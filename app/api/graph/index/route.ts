@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAllFiles } from "@/lib/graph/client";
 import { indexExtractedDocs } from "@/lib/rag/indexer";
 import { extractDoc } from "@/lib/extractors";
+import { resolveAiConfig, resolveGraphSecret } from "@/lib/serverConfig";
 import type { GraphConfig } from "@/lib/graph/types";
 import type { ExtractedDoc } from "@/lib/extractors";
 
@@ -13,12 +14,10 @@ export async function POST(req: NextRequest) {
     mockMode?: boolean;
     tenantId?: string;
     clientId?: string;
-    clientSecret?: string;
     siteUrl?: string;
     ollamaBaseUrl?: string;
     embedModel?: string;
     embeddingProvider?: "ollama" | "google";
-    googleApiKey?: string;
   };
 
   try {
@@ -32,16 +31,17 @@ export async function POST(req: NextRequest) {
     mockMode = true,
     tenantId = "",
     clientId = "",
-    clientSecret = "",
     siteUrl = "",
-    ollamaBaseUrl = "http://localhost:11434",
-    embedModel = "bge-large",
-    embeddingProvider = "ollama" as "ollama" | "google",
-    googleApiKey = "",
   } = body;
 
   if (!driveId) return NextResponse.json({ error: "Missing driveId" }, { status: 400 });
 
+  const aiConfig = resolveAiConfig({
+    ollamaBaseUrl: body.ollamaBaseUrl,
+    ollamaEmbedModel: body.embedModel,
+    embeddingProvider: body.embeddingProvider,
+  });
+  const clientSecret = resolveGraphSecret();
   const config: GraphConfig = { tenantId, clientId, clientSecret, siteUrl, driveId, mockMode };
   const sourceKey = `graph:${driveId}`;
 
@@ -94,7 +94,15 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const result = await indexExtractedDocs(sourceKey, docs, ollamaBaseUrl, embedModel, (msg) => send({ msg }), embeddingProvider, googleApiKey);
+        const result = await indexExtractedDocs(
+          sourceKey,
+          docs,
+          aiConfig.ollamaBaseUrl ?? "http://localhost:11434",
+          aiConfig.ollamaEmbedModel ?? "bge-large",
+          (msg) => send({ msg }),
+          aiConfig.embeddingProvider,
+          aiConfig.geminiApiKey
+        );
         send({ done: true, ...result });
       } catch (err) {
         send({ error: String(err) });

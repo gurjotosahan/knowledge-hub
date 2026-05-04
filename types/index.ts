@@ -4,14 +4,14 @@ export type DocType = "RFP" | "POV" | "Case Study" | "Trend Report";
 // ── App config (persisted in localStorage) ───────────────────────────────────
 
 export type AIProvider  = "ollama" | "openrouter" | "gemini";
-export type SourceType  = "local" | "sharepoint";
+export type SourceType  = "local" | "sharepoint" | "onedrive";
 
 export interface AppConfig {
   // Data source
   sourceType: SourceType;
   // Local source
   folderPath: string;
-  // SharePoint / Microsoft Graph source
+  // SharePoint / Microsoft Graph source (client_credentials)
   graphTenantId: string;
   graphClientId: string;
   graphClientSecret: string;

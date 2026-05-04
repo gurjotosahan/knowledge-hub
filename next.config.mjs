@@ -4,6 +4,15 @@ const nextConfig = {
     serverComponentsExternalPackages: ["@lancedb/lancedb"],
   },
 
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [{ key: "ngrok-skip-browser-warning", value: "true" }],
+      },
+    ];
+  },
+
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "via.placeholder.com" },

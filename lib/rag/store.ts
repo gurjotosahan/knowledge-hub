@@ -25,6 +25,24 @@ function metaPath(sourceKey: string): string {
   return dbDir(sourceKey) + ".meta.json";
 }
 
+const tableCache = new Map<string, Promise<lancedb.Table>>();
+const childChunkCache = new Map<string, Promise<RagChunk[]>>();
+
+function chunksTable(sourceKey: string): Promise<lancedb.Table> {
+  const dir = dbDir(sourceKey);
+  const cached = tableCache.get(dir);
+  if (cached) return cached;
+
+  const opened = lancedb.connect(dir).then((db) => db.openTable("chunks"));
+  tableCache.set(dir, opened);
+  return opened;
+}
+
+function clearRuntimeCaches(sourceKey: string): void {
+  tableCache.delete(dbDir(sourceKey));
+  childChunkCache.delete(sourceKey);
+}
+
 // ── Serialisation ─────────────────────────────────────────────────────────────
 
 function toRecord(chunk: RagChunk, dim: number): Record<string, unknown> {
@@ -65,6 +83,7 @@ export async function writeIndex(
   chunks: RagChunk[],
   meta: IndexMeta
 ): Promise<void> {
+  clearRuntimeCaches(sourceKey);
   const dir = dbDir(sourceKey);
   await fs.mkdir(path.dirname(dir), { recursive: true });
 
@@ -78,6 +97,7 @@ export async function writeIndex(
   await db.createTable("chunks", records, { mode: "overwrite" });
 
   await fs.writeFile(metaPath(sourceKey), JSON.stringify(meta), "utf-8");
+  clearRuntimeCaches(sourceKey);
 }
 
 // ── Read meta ─────────────────────────────────────────────────────────────────
@@ -98,8 +118,7 @@ export async function vectorSearch(
   embedding: number[],
   limit: number
 ): Promise<RagChunk[]> {
-  const db  = await lancedb.connect(dbDir(sourceKey));
-  const tbl = await db.openTable("chunks");
+  const tbl = await chunksTable(sourceKey);
 
   // Over-fetch then filter to children (level = "child" or "" for legacy)
   const rows = await tbl
@@ -115,17 +134,23 @@ export async function vectorSearch(
 
 // Fetch all child chunks for BM25 / filename scoring (text + meta only, no vectors)
 export async function fetchChildChunks(sourceKey: string): Promise<RagChunk[]> {
-  const db  = await lancedb.connect(dbDir(sourceKey));
-  const tbl = await db.openTable("chunks");
+  const cached = childChunkCache.get(sourceKey);
+  if (cached) return cached;
 
-  const rows = await tbl
-    .query()
-    .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
-    .toArray() as Record<string, unknown>[];
+  const loaded = (async () => {
+    const tbl = await chunksTable(sourceKey);
+    const rows = await tbl
+      .query()
+      .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
+      .toArray() as Record<string, unknown>[];
 
-  return rows
-    .filter((r) => (r.level as string) !== "parent")
-    .map(fromRecord);
+    return rows
+      .filter((r) => (r.level as string) !== "parent")
+      .map(fromRecord);
+  })();
+
+  childChunkCache.set(sourceKey, loaded);
+  return loaded;
 }
 
 // Fetch parent chunks by IDs for context expansion
@@ -134,8 +159,7 @@ export async function fetchParentsByIds(
   parentIds: string[]
 ): Promise<RagChunk[]> {
   if (!parentIds.length) return [];
-  const db  = await lancedb.connect(dbDir(sourceKey));
-  const tbl = await db.openTable("chunks");
+  const tbl = await chunksTable(sourceKey);
 
   // LanceDB WHERE with IN clause
   const list = parentIds.map((id) => `'${id.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`).join(", ");
@@ -153,8 +177,7 @@ export async function fetchFileParents(
   sourceKey: string,
   filePath: string
 ): Promise<RagChunk[]> {
-  const db  = await lancedb.connect(dbDir(sourceKey));
-  const tbl = await db.openTable("chunks");
+  const tbl = await chunksTable(sourceKey);
 
   const escaped = filePath.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   const rows = await tbl

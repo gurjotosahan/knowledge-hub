@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildIndex, getIndexStatus } from "@/lib/rag/indexer";
+import { resolveAiConfig } from "@/lib/serverConfig";
 
 export const maxDuration = 300;
 
@@ -18,7 +19,6 @@ export async function POST(req: NextRequest) {
     ollamaBaseUrl?: string;
     embedModel?: string;
     embeddingProvider?: "ollama" | "google";
-    googleApiKey?: string;
   };
   try {
     body = await req.json();
@@ -26,13 +26,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const {
-    folderPath,
-    ollamaBaseUrl = "http://localhost:11434",
-    embedModel = "bge-large",
-    embeddingProvider = "ollama",
-    googleApiKey = "",
-  } = body;
+  const { folderPath } = body;
+  const aiConfig = resolveAiConfig({
+    ollamaBaseUrl: body.ollamaBaseUrl,
+    ollamaEmbedModel: body.embedModel,
+    embeddingProvider: body.embeddingProvider,
+  });
 
   if (!folderPath) {
     return NextResponse.json({ error: "Missing folderPath" }, { status: 400 });
@@ -47,11 +46,11 @@ export async function POST(req: NextRequest) {
       try {
         const result = await buildIndex(
           folderPath,
-          ollamaBaseUrl,
-          embedModel,
+          aiConfig.ollamaBaseUrl ?? "http://localhost:11434",
+          aiConfig.ollamaEmbedModel ?? "bge-large",
           (msg) => send({ msg }),
-          embeddingProvider,
-          googleApiKey
+          aiConfig.embeddingProvider,
+          aiConfig.geminiApiKey
         );
         send({ done: true, ...result });
       } catch (err) {

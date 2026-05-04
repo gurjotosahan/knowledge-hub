@@ -220,8 +220,9 @@ async function callLLM(
         messages: ollamaMessages,
         tools: tools.length ? tools : undefined,
         stream: false,
+        options: { num_predict: 1024 },
       }),
-      signal: AbortSignal.timeout(90_000),
+      signal: AbortSignal.timeout(45_000),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}`);
     const data = await res.json();
@@ -272,9 +273,10 @@ async function callLLM(
     body: JSON.stringify({
       model,
       messages,
+      max_tokens: 1024,
       ...(tools.length && { tools, tool_choice: "auto" }),
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(45_000),
   });
   if (!res.ok) throw new Error(`${aiProvider} ${res.status}`);
   const data = await res.json();

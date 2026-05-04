@@ -17,17 +17,21 @@ interface SidebarProps {
   activeSessionId: string | null;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  appMode: "knowledge" | "research";
+  onSetAppMode: (mode: "knowledge" | "research") => void;
 }
 
 export default function Sidebar({
   selectedLine, onSelect, config, onOpenSettings, onGoHome, onNewChat,
   sessions, activeSessionId, onSelectSession, onDeleteSession,
+  appMode, onSetAppMode,
 }: SidebarProps) {
   const [serviceExpanded, setServiceExpanded] = useState<Record<string, boolean>>({
     BFSI: true,
     Healthcare: false,
     "Life Sciences": false,
   });
+  const [researchOpen,    setResearchOpen]    = useState(true);
   const [historyOpen,     setHistoryOpen]     = useState(true);
   const [hoveredSession,  setHoveredSession]  = useState<string | null>(null);
 
@@ -113,83 +117,129 @@ export default function Sidebar({
             </div>
           );
         })}
+
       </nav>
 
       {/* ── Recent Chats (collapsible, bottom) ── */}
-      {groups.length > 0 && (
-        <div className="border-t border-slate-700 shrink-0" style={{ maxHeight: historyOpen ? 320 : "auto" }}>
-          {/* Toggle header */}
-          <button
-            onClick={() => setHistoryOpen((p) => !p)}
-            className="w-full flex items-center justify-between px-5 py-3 text-xs font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Recent Chats
-            </span>
-            <svg
-              className={`w-3.5 h-3.5 transition-transform duration-200 ${historyOpen ? "" : "-rotate-90"}`}
-              fill="none" viewBox="0 0 24 24" stroke="currentColor"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+      <div className="border-t border-slate-700 shrink-0" style={{ maxHeight: historyOpen ? 360 : "auto" }}>
+        {/* Toggle header */}
+        <button
+          onClick={() => setHistoryOpen((p) => !p)}
+          className="w-full flex items-center justify-between px-5 py-3 text-xs font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
+        >
+          <span className="flex items-center gap-2">
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-          </button>
+            Recent Chats
+          </span>
+          <svg
+            className={`w-3.5 h-3.5 transition-transform duration-200 ${historyOpen ? "" : "-rotate-90"}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
 
-          {/* Scrollable history list */}
-          {historyOpen && (
-            <div className="overflow-y-auto px-3 pb-2" style={{ maxHeight: 272 }}>
-              {groups.map((group) => (
-                <div key={group.label} className="mb-3">
-                  <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
-                    {group.label}
-                  </p>
-                  {group.items.map((session) => {
-                    const isActive = session.id === activeSessionId;
-                    return (
-                      <div
-                        key={session.id}
-                        className="relative group/item"
-                        onMouseEnter={() => setHoveredSession(session.id)}
-                        onMouseLeave={() => setHoveredSession(null)}
-                      >
-                        <button
-                          onClick={() => onSelectSession(session.id)}
-                          className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors leading-snug ${
-                            isActive
-                              ? "bg-slate-700 text-white"
-                              : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                          }`}
-                        >
-                          <span className="line-clamp-2 pr-5">{session.title}</span>
-                        </button>
-                        {hoveredSession === session.id && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); onDeleteSession(session.id); }}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded text-slate-500 hover:text-red-400 hover:bg-slate-700 transition-colors"
-                            title="Delete"
-                          >
-                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
+        {historyOpen && (
+          <div className="overflow-y-auto px-3 pb-2" style={{ maxHeight: 308 }}>
+
+            {/* ── Client Research entry ── */}
+            <div className="mb-3">
+              <button
+                onClick={() => setResearchOpen((p) => !p)}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                  appMode === "research"
+                    ? "bg-sky-600 text-white"
+                    : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                }`}
+              >
+                <span
+                  className="flex items-center gap-2"
+                  onClick={(e) => { e.stopPropagation(); onSetAppMode("research"); }}
+                >
+                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  Client Research
+                </span>
+                <svg
+                  className={`w-3 h-3 shrink-0 transition-transform duration-200 ${researchOpen ? "rotate-90" : ""} ${appMode === "research" ? "text-sky-200" : "text-slate-500"}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              {researchOpen && (
+                <div className="mt-1 ml-3 pl-3 border-l border-slate-700 space-y-0.5">
+                  {["New Research", "Saved Reports", "Follow-up Chat"].map((child) => (
+                    <button
+                      key={child}
+                      onClick={() => onSetAppMode("research")}
+                      className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors ${
+                        appMode === "research"
+                          ? "text-sky-300 hover:text-white hover:bg-slate-800"
+                          : "text-slate-400 hover:text-white hover:bg-slate-800"
+                      }`}
+                    >
+                      {child}
+                    </button>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
-      )}
+
+            {/* ── Chat history groups ── */}
+            {groups.map((group) => (
+              <div key={group.label} className="mb-3">
+                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+                  {group.label}
+                </p>
+                {group.items.map((session) => {
+                  const isActive = session.id === activeSessionId;
+                  return (
+                    <div
+                      key={session.id}
+                      className="relative group/item"
+                      onMouseEnter={() => setHoveredSession(session.id)}
+                      onMouseLeave={() => setHoveredSession(null)}
+                    >
+                      <button
+                        onClick={() => onSelectSession(session.id)}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors leading-snug ${
+                          isActive
+                            ? "bg-slate-700 text-white"
+                            : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                        }`}
+                      >
+                        <span className="line-clamp-2 pr-5">{session.title}</span>
+                      </button>
+                      {hoveredSession === session.id && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onDeleteSession(session.id); }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded text-slate-500 hover:text-red-400 hover:bg-slate-700 transition-colors"
+                          title="Delete"
+                        >
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ── Footer ── */}
       <div className="px-4 py-3 border-t border-slate-700 flex items-center justify-between shrink-0">
         <div>
-          <p className="text-xs text-slate-500">© 2025 Apexon Inc.</p>
+          <p className="text-xs text-slate-500">© 2026 Apexon Inc.</p>
           {config.folderPath && (
             <p className="text-[10px] text-emerald-500 mt-0.5 truncate max-w-[160px]">
               ● {config.aiProvider === "ollama"  ? config.ollamaModel   || "Ollama"

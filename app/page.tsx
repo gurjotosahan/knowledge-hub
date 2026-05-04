@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { ServiceLine, Source, AppConfig, Document } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
 import { aiAnswer } from "@/data/mockData";
@@ -8,9 +8,10 @@ import Sidebar from "@/components/Sidebar";
 import ChatInput from "@/components/ChatInput";
 import Card from "@/components/Card";
 import PreviewPanel from "@/components/PreviewPanel";
-import LocalDocPreview from "@/components/LocalDocPreview";
+import LocalDocPreview, { type SlideDeck, type SlideDeckItem } from "@/components/LocalDocPreview";
 import Settings from "@/components/Settings";
 import DocumentBrowser from "@/components/DocumentBrowser";
+import ClientResearch from "@/components/ClientResearch";
 import {
   loadSessions,
   saveSession,
@@ -20,6 +21,7 @@ import {
 } from "@/lib/chatStorage";
 
 const CONFIG_KEY = "apexon-hub-config";
+const DECKS_KEY = "apexon-hub-slide-decks";
 
 interface AgentLogEntry {
   iteration: number;
@@ -48,12 +50,79 @@ interface Turn {
   tokenUsage?: TokenUsage;
 }
 
+function renderAnswerWithCitations(
+  text: string,
+  sources: Source[],
+  onSourceClick: (src: Source) => void
+): React.ReactNode[] {
+  const parts = text.split(/(\[\d+\])/g);
+  return parts.map((part, i) => {
+    const match = part.match(/^\[(\d+)\]$/);
+    if (match) {
+      const idx = parseInt(match[1], 10) - 1;
+      const src = sources?.[idx];
+      if (src) {
+        return (
+          <button
+            key={i}
+            onClick={() => onSourceClick(src)}
+            className="inline-flex items-center justify-center w-4 h-4 rounded-full text-[9px] font-bold align-super mx-0.5 bg-sky-100 text-sky-700 hover:bg-sky-600 hover:text-white transition-colors cursor-pointer"
+          >
+            {idx + 1}
+          </button>
+        );
+      }
+      return <span key={i} className="text-[10px] align-super text-slate-400 mx-0.5">{part}</span>;
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+function CopyButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = React.useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(getText()).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <div className="flex justify-end">
+      <button
+        onClick={handleCopy}
+        title="Copy response"
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+      >
+        {copied ? (
+          <>
+            <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-emerald-500">Copied</span>
+          </>
+        ) : (
+          <>
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            Copy
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
 const SUGGESTIONS = [
   "Show me BFSI case studies with ROI metrics",
   "What differentiators do we have for healthcare digital transformation?",
   "Find RFP responses mentioning cloud migration",
   "What proof points do we have for data analytics projects?",
 ];
+
+function newDeckName(count: number): string {
+  return `Deck ${count + 1}`;
+}
 
 export default function Page() {
   // ── Config ────────────────────────────────────────────────────────────────
@@ -68,8 +137,15 @@ export default function Page() {
   }, []);
 
   const saveConfig = (next: AppConfig) => {
-    setConfig(next);
-    localStorage.setItem(CONFIG_KEY, JSON.stringify(next));
+    const sanitized = {
+      ...next,
+      graphClientSecret: "",
+      openrouterApiKey: "",
+      geminiApiKey: "",
+      tavilyApiKey: "",
+    };
+    setConfig(sanitized);
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(sanitized));
     setShowSettings(false);
   };
 
@@ -112,6 +188,7 @@ export default function Page() {
   const newSessionId = () => `session-${Date.now()}`;
 
   // ── State ─────────────────────────────────────────────────────────────────
+  const [appMode,          setAppMode]          = useState<"knowledge" | "research">("knowledge");
   const [selectedLine,     setSelectedLine]     = useState<ServiceLine | null>(null);
   const [selectedSource,   setSelectedSource]   = useState<Source | null>(null);
   const [view,             setView]             = useState<"chat" | "source">("chat");
@@ -119,10 +196,16 @@ export default function Page() {
   const [searchMode,       setSearchMode]       = useState<"rag" | "mixed">("rag");
   const [sessions,         setSessions]         = useState<ChatSession[]>([]);
   const [activeSessionId,  setActiveSessionId]  = useState<string | null>(null);
+  const [slideDecks,       setSlideDecks]       = useState<SlideDeck[]>([]);
+  const [activeDeckId,     setActiveDeckId]     = useState<string>("");
+  const [deckExporting,    setDeckExporting]    = useState(false);
+  const [deckError,        setDeckError]        = useState("");
 
   // Keep a stable ref to activeSessionId so callbacks don't need it in deps
   const activeSessionIdRef = useRef<string | null>(null);
   activeSessionIdRef.current = activeSessionId;
+
+  const searchAbortRef = useRef<AbortController | null>(null);
 
   const currentTurn  = turns[turns.length - 1] ?? null;
   const isAnyLoading = currentTurn?.isLoading ?? false;
@@ -132,20 +215,145 @@ export default function Page() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns.length, isAnyLoading]);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DECKS_KEY);
+      const parsed = raw ? JSON.parse(raw) as { decks?: SlideDeck[]; activeDeckId?: string } : null;
+      const decks = parsed?.decks?.length
+        ? parsed.decks
+        : [{ id: `deck-${Date.now()}`, name: "Deck 1", items: [] }];
+      setSlideDecks(decks);
+      setActiveDeckId(parsed?.activeDeckId && decks.some((deck) => deck.id === parsed.activeDeckId)
+        ? parsed.activeDeckId
+        : decks[0].id);
+    } catch {
+      const deck = { id: `deck-${Date.now()}`, name: "Deck 1", items: [] };
+      setSlideDecks([deck]);
+      setActiveDeckId(deck.id);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (slideDecks.length === 0 || !activeDeckId) return;
+    localStorage.setItem(DECKS_KEY, JSON.stringify({ decks: slideDecks, activeDeckId }));
+  }, [slideDecks, activeDeckId]);
+
   // ── Derived config ────────────────────────────────────────────────────────
   const sourceKey =
     config.sourceType === "sharepoint"
       ? `graph:${config.graphDriveId || "mock-drive-documents"}`
+      : config.sourceType === "onedrive"
+      ? "onedrive:me"
       : config.folderPath;
 
   const hasDocumentSource =
-    config.sourceType === "sharepoint" || Boolean(config.folderPath);
+    config.sourceType === "sharepoint" ||
+    config.sourceType === "onedrive" ||
+    Boolean(config.folderPath);
 
   const isLocalMode =
     hasDocumentSource &&
     ((config.aiProvider === "ollama"     && Boolean(config.ollamaModel)) ||
      (config.aiProvider === "openrouter" && Boolean(config.openrouterModel)) ||
      (config.aiProvider === "gemini"     && Boolean(config.geminiModel)));
+
+  const activeDeck = slideDecks.find((deck) => deck.id === activeDeckId) ?? slideDecks[0];
+
+  const createSlideDeck = () => {
+    const deck: SlideDeck = {
+      id: `deck-${Date.now()}`,
+      name: newDeckName(slideDecks.length),
+      items: [],
+    };
+    setSlideDecks((prev) => [...prev, deck]);
+    setActiveDeckId(deck.id);
+    setDeckError("");
+  };
+
+  const toggleDeckSlide = (item: Omit<SlideDeckItem, "id">, deckId = activeDeckId) => {
+    setDeckError("");
+    const targetDeck = slideDecks.find((deck) => deck.id === deckId);
+    const alreadyInDeck = targetDeck?.items.some(
+      (existing) => existing.filePath === item.filePath && existing.slideNumber === item.slideNumber
+    );
+    const deckHasAnotherSource = Boolean(
+      targetDeck?.items.length &&
+      !targetDeck.items.some((existing) => existing.filePath === item.filePath)
+    );
+    if (!alreadyInDeck && deckHasAnotherSource) {
+      setDeckError("This deck already uses another source PPTX. Create a new deck for this file.");
+      return;
+    }
+
+    let targetDeckId = deckId;
+    if (!targetDeckId) {
+      const deck: SlideDeck = { id: `deck-${Date.now()}`, name: "Deck 1", items: [] };
+      setSlideDecks([deck]);
+      setActiveDeckId(deck.id);
+      targetDeckId = deck.id;
+    }
+
+    setSlideDecks((prev) =>
+      prev.map((deck) => {
+        if (deck.id !== targetDeckId) return deck;
+        const exists = deck.items.some(
+          (existing) => existing.filePath === item.filePath && existing.slideNumber === item.slideNumber
+        );
+        return {
+          ...deck,
+          items: exists
+            ? deck.items.filter((existing) => !(existing.filePath === item.filePath && existing.slideNumber === item.slideNumber))
+            : [...deck.items, { ...item, id: `${item.filePath}::${item.slideNumber}` }],
+        };
+      })
+    );
+  };
+
+  const clearActiveDeck = () => {
+    if (!activeDeckId) return;
+    setSlideDecks((prev) => prev.map((deck) => deck.id === activeDeckId ? { ...deck, items: [] } : deck));
+    setDeckError("");
+  };
+
+  const exportActiveDeck = async () => {
+    if (!activeDeck || activeDeck.items.length === 0) return;
+    setDeckExporting(true);
+    setDeckError("");
+    try {
+      const res = await fetch("/api/local/create-pptx", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: activeDeck.name,
+          items: activeDeck.items.map((item) => ({
+            filePath: item.filePath,
+            fileTitle: item.fileTitle,
+            slideNumber: item.slideNumber,
+          })),
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? `Server error ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `${activeDeck.name.replace(/\W+/g, "-")}.pptx`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDeckError(String(err));
+    } finally {
+      setDeckExporting(false);
+    }
+  };
 
   // ── Search ────────────────────────────────────────────────────────────────
   const handleSearch = async (q: string) => {
@@ -176,25 +384,22 @@ export default function Page() {
     }
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 270_000);
+      searchAbortRef.current = new AbortController();
+      const timer = setTimeout(() => searchAbortRef.current?.abort(), 270_000);
       const res = await fetch("/api/ai/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
+        signal: searchAbortRef.current.signal,
         body: JSON.stringify({
           query: q,
           conversationHistory,
           sourceKey,
           searchMode,
-          tavilyApiKey:      config.tavilyApiKey,
           aiProvider:        config.aiProvider,
           ollamaBaseUrl:     config.ollamaBaseUrl,
           ollamaModel:       config.ollamaModel,
           ollamaEmbedModel:  config.ollamaEmbedModel,
-          openrouterApiKey:  config.openrouterApiKey,
           openrouterModel:   config.openrouterModel,
-          geminiApiKey:      config.geminiApiKey,
           geminiModel:       config.geminiModel,
           embeddingProvider: config.embeddingProvider,
         }),
@@ -226,23 +431,31 @@ export default function Page() {
         return next;
       });
     } catch (err) {
+      const aborted = (err instanceof DOMException && err.name === "AbortError");
       setTurns((prev) =>
         prev.map((t) =>
           t.id === turnId
-            ? { ...t, isLoading: false, answer: `Error: ${String(err)}`, keyPoints: [], metrics: [], sources: [], docs: [] }
+            ? { ...t, isLoading: false, answer: aborted ? undefined : `Error: ${String(err)}`, keyPoints: [], metrics: [], sources: [], docs: [] }
             : t
         )
       );
+    } finally {
+      searchAbortRef.current = null;
     }
   };
 
-  const goHome = () => { setTurns([]); setView("chat"); setActiveSessionId(null); };
+  const handleStop = () => {
+    searchAbortRef.current?.abort();
+  };
+
+  const goHome = () => { setTurns([]); setView("chat"); setActiveSessionId(null); setAppMode("knowledge"); };
 
   const handleNewChat = () => {
     setTurns([]);
     setView("chat");
     setActiveSessionId(null);
     setSelectedSource(null);
+    setAppMode("knowledge");
   };
 
   const handleSelectSession = (id: string) => {
@@ -280,6 +493,8 @@ export default function Page() {
         activeSessionId={activeSessionId}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        appMode={appMode}
+        onSetAppMode={setAppMode}
       />
 
       {/* Main */}
@@ -292,7 +507,6 @@ export default function Page() {
             graphMockMode={config.graphMockMode}
             graphTenantId={config.graphTenantId}
             graphClientId={config.graphClientId}
-            graphClientSecret={config.graphClientSecret}
             graphSiteUrl={config.graphSiteUrl}
             selectedSourceId={selectedSource?.id ?? null}
             onSourceSelect={setSelectedSource}
@@ -335,8 +549,13 @@ export default function Page() {
               </button>
             </div>
 
-            {/* ── Scrollable messages ───────────────────────────────────── */}
-            <div className="flex-1 overflow-y-auto">
+            {/* ── Client Research mode ──────────────────────────────────── */}
+            {appMode === "research" && (
+              <ClientResearch config={config} />
+            )}
+
+            {/* ── Knowledge Hub chat ───────────────────────────────────── */}
+            <div className={`flex-1 overflow-y-auto${appMode !== "knowledge" ? " hidden" : ""}`}>
               {turns.length === 0 ? (
                 /* ── Landing / empty state ── */
                 <div className="max-w-2xl mx-auto px-6 flex flex-col items-center justify-center h-full gap-8 pb-24">
@@ -348,8 +567,41 @@ export default function Page() {
                       </svg>
                     </div>
                     <h1 className="text-2xl font-bold text-slate-800">Apexon Knowledge Hub</h1>
+
+                    {/* ── Mode toggle — center stage ── */}
+                    <div className="flex gap-2 p-1.5 bg-slate-100 rounded-2xl shadow-inner">
+                      <button
+                        onClick={() => setAppMode("knowledge")}
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                          appMode === "knowledge"
+                            ? "bg-white text-slate-800 shadow-md"
+                            : "text-slate-500 hover:text-slate-700"
+                        }`}
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                        </svg>
+                        Knowledge Hub
+                      </button>
+                      <button
+                        onClick={() => setAppMode("research")}
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                          appMode === "research"
+                            ? "bg-white text-slate-800 shadow-md"
+                            : "text-slate-500 hover:text-slate-700"
+                        }`}
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                        Client Research
+                      </button>
+                    </div>
+
                     <p className="text-sm text-slate-500">
-                      {isLocalMode
+                      {appMode === "research"
+                        ? "Generate structured presales intelligence for any prospect"
+                        : isLocalMode
                         ? "Search your documents — ask follow-up questions in the same conversation"
                         : "AI-powered search across RFPs, POVs, and case studies"}
                     </p>
@@ -409,9 +661,13 @@ export default function Page() {
                             </div>
                           ) : (turn.answer ?? (isLocalMode ? null : aiAnswer.answer)) ? (
                             <>
-                              {/* Answer prose */}
-                              <p className="text-sm text-slate-700 leading-relaxed">
-                                {turn.answer ?? aiAnswer.answer}
+                              {/* Answer prose with inline citation badges */}
+                              <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+                                {renderAnswerWithCitations(
+                                  turn.answer ?? aiAnswer.answer,
+                                  turn.sources ?? aiAnswer.sources,
+                                  setSelectedSource
+                                )}
                               </p>
 
                               {/* Proof points */}
@@ -440,59 +696,97 @@ export default function Page() {
                                 </ul>
                               )}
 
-                              {/* Source citations */}
-                              {((turn.sources?.length ?? 0) > 0 || (!isLocalMode && aiAnswer.sources.length > 0)) && (
-                                <div>
-                                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Sources</p>
-                                  <div className="flex flex-wrap gap-2">
-                                    {(turn.sources ?? aiAnswer.sources).map((src, i) => {
-                                      if (src.sourceType === "web") {
+                              {/* Copy button */}
+                              <CopyButton
+                                getText={() => {
+                                  const answer = (turn.answer ?? aiAnswer.answer).replace(/\[\d+\]/g, "").trim();
+                                  const metrics = (turn.metrics ?? []).map(m => `• ${m}`).join("\n");
+                                  const keyPoints = (turn.keyPoints ?? []).map(k => `• ${k}`).join("\n");
+                                  return [answer, metrics, keyPoints].filter(Boolean).join("\n\n");
+                                }}
+                              />
+
+                              {/* Source citations — grouped by document */}
+                              {((turn.sources?.length ?? 0) > 0 || (!isLocalMode && aiAnswer.sources.length > 0)) && (() => {
+                                const allSources = turn.sources ?? aiAnswer.sources;
+
+                                // Build RAG groups: docId → { first source, list of {refNum, src} }
+                                type RefEntry = { refNum: number; src: Source };
+                                type DocGroup = { primary: Source; refs: RefEntry[] };
+                                const ragGroups: Record<string, DocGroup> = {};
+                                allSources.forEach((src, i) => {
+                                  if (src.sourceType === "web") return;
+                                  if (!ragGroups[src.docId]) ragGroups[src.docId] = { primary: src, refs: [] };
+                                  ragGroups[src.docId].refs.push({ refNum: i + 1, src });
+                                });
+
+                                const webSources = allSources
+                                  .map((src, i) => ({ src, refNum: i + 1 }))
+                                  .filter(({ src }) => src.sourceType === "web");
+
+                                return (
+                                  <div>
+                                    <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Sources</p>
+                                    <div className="flex flex-wrap gap-2">
+                                      {/* RAG sources — one button per document */}
+                                      {Object.values(ragGroups).map(({ primary, refs }) => {
+                                        const isSelected = refs.some(r => selectedSource?.id === r.src.id);
                                         return (
-                                          <a
-                                            key={src.id}
-                                            href={src.url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all bg-white text-violet-700 border-violet-200 hover:bg-violet-50 hover:border-violet-400"
+                                          <button
+                                            key={primary.docId}
+                                            onClick={() => setSelectedSource(refs[0].src)}
+                                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                                              isSelected
+                                                ? "bg-sky-600 text-white border-sky-600 shadow-sm"
+                                                : "bg-white text-sky-700 border-sky-200 hover:bg-sky-50 hover:border-sky-400"
+                                            }`}
                                           >
-                                            <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                                            </svg>
-                                            {src.title}
-                                            <span className="px-1 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-600">WEB</span>
-                                          </a>
+                                            {/* Reference number badges */}
+                                            <span className="flex items-center gap-0.5 shrink-0">
+                                              {refs.map(({ refNum }) => (
+                                                <span
+                                                  key={refNum}
+                                                  className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold"
+                                                  style={isSelected
+                                                    ? { backgroundColor: "rgba(255,255,255,0.2)", color: "white" }
+                                                    : { backgroundColor: "#e0f2fe", color: "#0369a1" }}
+                                                >
+                                                  {refNum}
+                                                </span>
+                                              ))}
+                                            </span>
+                                            {primary.title}
+                                            <span className={`px-1 py-0.5 rounded text-[9px] font-bold ${isSelected ? "bg-white/20 text-white" : "bg-sky-100 text-sky-600"}`}>RAG</span>
+                                          </button>
                                         );
-                                      }
-                                      const isSelected = selectedSource?.id === src.id;
-                                      return (
-                                        <button
+                                      })}
+
+                                      {/* Web sources — one per URL */}
+                                      {webSources.map(({ src, refNum }) => (
+                                        <a
                                           key={src.id}
-                                          onClick={() => setSelectedSource(src)}
-                                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                                            isSelected
-                                              ? "bg-sky-600 text-white border-sky-600 shadow-sm"
-                                              : "bg-white text-sky-700 border-sky-200 hover:bg-sky-50 hover:border-sky-400"
-                                          }`}
+                                          href={src.url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all bg-white text-violet-700 border-violet-200 hover:bg-violet-50 hover:border-violet-400"
                                         >
                                           <span
                                             className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0"
-                                            style={isSelected
-                                              ? { backgroundColor: "rgba(255,255,255,0.2)", color: "white" }
-                                              : { backgroundColor: "#e0f2fe", color: "#0369a1" }}
+                                            style={{ backgroundColor: "#f3e8ff", color: "#7c3aed" }}
                                           >
-                                            {i + 1}
+                                            {refNum}
                                           </span>
+                                          <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                                          </svg>
                                           {src.title}
-                                          <span className={isSelected ? "text-sky-100" : "text-slate-400"}>
-                                            · {src.fileType === "pdf" ? "p." : "slide"} {src.slide}
-                                          </span>
-                                          <span className={`px-1 py-0.5 rounded text-[9px] font-bold ${isSelected ? "bg-white/20 text-white" : "bg-sky-100 text-sky-600"}`}>RAG</span>
-                                        </button>
-                                      );
-                                    })}
+                                          <span className="px-1 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-600">WEB</span>
+                                        </a>
+                                      ))}
+                                    </div>
                                   </div>
-                                </div>
-                              )}
+                                );
+                              })()}
 
                               {/* Agent trace + token usage */}
                               {(turn.agentLog?.length || turn.tokenUsage) && (
@@ -582,7 +876,7 @@ export default function Page() {
             </div>
 
             {/* ── Fixed input bar ───────────────────────────────────────── */}
-            <div className="shrink-0 border-t border-slate-100 bg-white px-6 pt-3 pb-4">
+            <div className={`shrink-0 border-t border-slate-100 bg-white px-6 pt-3 pb-4${appMode !== "knowledge" ? " hidden" : ""}`}>
               <div className="max-w-3xl mx-auto flex flex-col gap-2">
                 {/* Search mode toggle */}
                 <div className="flex items-center gap-3">
@@ -614,21 +908,16 @@ export default function Page() {
                       + Web
                     </button>
                   </div>
-                  {searchMode === "mixed" && !config.tavilyApiKey && (
+                  {searchMode === "mixed" && (
                     <button
                       onClick={() => setShowSettings(true)}
-                      className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full hover:bg-amber-100 transition-colors"
+                      className="text-[11px] text-violet-700 bg-violet-50 border border-violet-200 px-2.5 py-1 rounded-full hover:bg-violet-100 transition-colors"
                     >
-                      Add Tavily key in Settings →
+                      Uses server Tavily key when configured
                     </button>
                   )}
-                  {searchMode === "mixed" && config.tavilyApiKey && (
-                    <span className="text-[11px] text-violet-600 bg-violet-50 border border-violet-200 px-2.5 py-1 rounded-full">
-                      ● Web search active
-                    </span>
-                  )}
                 </div>
-                <ChatInput onSend={handleSearch} isLoading={isAnyLoading} />
+                <ChatInput onSend={handleSearch} onStop={handleStop} isLoading={isAnyLoading} />
               </div>
             </div>
 
@@ -638,7 +927,19 @@ export default function Page() {
 
       {/* Right panel */}
       {showLocalPreview && selectedSource ? (
-        <LocalDocPreview source={selectedSource} />
+        <LocalDocPreview
+          source={selectedSource}
+          activeDeck={activeDeck}
+          decks={slideDecks}
+          activeDeckId={activeDeckId}
+          onSetActiveDeck={(deckId) => { setActiveDeckId(deckId); setDeckError(""); }}
+          onCreateDeck={createSlideDeck}
+          onToggleDeckSlide={toggleDeckSlide}
+          onClearDeck={clearActiveDeck}
+          onExportDeck={exportActiveDeck}
+          deckExporting={deckExporting}
+          deckError={deckError}
+        />
       ) : (
         <PreviewPanel source={selectedSource} />
       )}

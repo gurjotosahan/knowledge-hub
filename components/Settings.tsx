@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { AppConfig, AIProvider, SourceType } from "@/types";
+import OneDrivePicker from "./OneDrivePicker";
 
 interface SettingsProps {
   config: AppConfig;
@@ -48,15 +49,13 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
     try {
       const params = new URLSearchParams({ provider: local.aiProvider });
       if (local.aiProvider === "ollama") params.set("baseUrl", local.ollamaBaseUrl);
-      else if (local.aiProvider === "gemini") params.set("apiKey", local.geminiApiKey);
-      else params.set("apiKey", local.openrouterApiKey);
       const res  = await fetch(`/api/ai/models?${params}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       setModels(data.models ?? []);
     } catch (err) { setModelsError(String(err)); }
     finally      { setModelsLoading(false); }
-  }, [local.aiProvider, local.ollamaBaseUrl, local.openrouterApiKey, local.geminiApiKey]);
+  }, [local.aiProvider, local.ollamaBaseUrl]);
 
   useEffect(() => { fetchModels(); }, [fetchModels]);
 
@@ -87,7 +86,6 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
         embeddingProvider: local.embeddingProvider,
         ollamaBaseUrl:     local.ollamaBaseUrl,
         embedModel:        local.ollamaEmbedModel || "bge-large",
-        googleApiKey:      local.geminiApiKey,
       };
 
       if (local.sourceType === "sharepoint") {
@@ -97,7 +95,6 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
           mockMode:     local.graphMockMode,
           tenantId:     local.graphTenantId,
           clientId:     local.graphClientId,
-          clientSecret: local.graphClientSecret,
           siteUrl:      local.graphSiteUrl,
           ...embedPayload,
         };
@@ -192,6 +189,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
 
   const canIndex =
     !indexing &&
+    local.sourceType !== "onedrive" &&
     (local.sourceType === "sharepoint"
       ? Boolean(local.graphDriveId || local.graphMockMode)
       : Boolean(local.folderPath));
@@ -229,8 +227,9 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
             </div>
 
             <div className="flex gap-1 p-1 bg-slate-100 rounded-xl mb-4">
-              {sourceTab("local",       "Local Folder")}
-              {sourceTab("sharepoint",  "SharePoint (Graph)")}
+              {sourceTab("local",      "Local Folder")}
+              {sourceTab("onedrive",   "OneDrive")}
+              {sourceTab("sharepoint", "SharePoint")}
             </div>
 
             {local.sourceType === "local" ? (
@@ -260,6 +259,14 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                   Scans recursively for <code className="text-sky-600">.pdf</code> and <code className="text-sky-600">.pptx</code> files.
                 </p>
               </div>
+            ) : local.sourceType === "onedrive" ? (
+              /* ── OneDrive OAuth ── */
+              <OneDrivePicker
+                embeddingProvider={local.embeddingProvider}
+                ollamaBaseUrl={local.ollamaBaseUrl}
+                embedModel={local.ollamaEmbedModel || "bge-large"}
+                onIndexed={() => fetchIndexStatus("onedrive:me")}
+              />
             ) : (
               /* ── SharePoint / Graph ── */
               <div className="space-y-3">
@@ -291,12 +298,9 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono" />
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1.5">Client Secret</label>
-                      <input type="password" value={local.graphClientSecret} onChange={(e) => set("graphClientSecret", e.target.value)}
-                        placeholder="Azure app secret value"
-                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500" />
-                    </div>
+                    <p className="text-xs text-slate-400 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                      Client secret is read server-side from <code className="text-slate-600">AZURE_CLIENT_SECRET</code> or <code className="text-slate-600">GRAPH_CLIENT_SECRET</code>.
+                    </p>
                     <div>
                       <label className="block text-xs font-medium text-slate-500 mb-1.5">SharePoint Site URL</label>
                       <input type="text" value={local.graphSiteUrl} onChange={(e) => set("graphSiteUrl", e.target.value)}
@@ -392,15 +396,17 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
               <p className="mb-3 text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{indexError}</p>
             )}
 
-            <button
-              onClick={buildIndex}
-              disabled={!canIndex}
-              className="w-full py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
-            >
-              {indexing ? (
-                <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Building index…</>
-              ) : indexStatus?.exists ? "Rebuild Index" : "Build Index"}
-            </button>
+            {local.sourceType !== "onedrive" && (
+              <button
+                onClick={buildIndex}
+                disabled={!canIndex}
+                className="w-full py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              >
+                {indexing ? (
+                  <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Building index…</>
+                ) : indexStatus?.exists ? "Rebuild Index" : "Build Index"}
+              </button>
+            )}
           </section>
 
           {/* ── Section 3: AI Engine ── */}
@@ -450,12 +456,9 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
 
             {local.aiProvider === "openrouter" && (
               <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">OpenRouter API key</label>
-                  <input type="password" value={local.openrouterApiKey} onChange={(e) => set("openrouterApiKey", e.target.value)}
-                    placeholder="sk-or-v1-…"
-                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500" />
-                </div>
+                <p className="text-xs text-slate-400 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                  OpenRouter key is read server-side from <code className="text-slate-600">OPENROUTER_API_KEY</code>.
+                </p>
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-medium text-slate-500">Model</label>
@@ -466,7 +469,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                   ) : (
                     <select value={local.openrouterModel} onChange={(e) => set("openrouterModel", e.target.value)}
                       className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
-                      <option value="">{modelsLoading ? "Fetching…" : models.length === 0 ? "Enter API key and click Fetch" : "Select a model"}</option>
+                      <option value="">{modelsLoading ? "Fetching…" : models.length === 0 ? "Set server API key and click Fetch" : "Select a model"}</option>
                       {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
                   )}
@@ -476,15 +479,9 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
 
             {local.aiProvider === "gemini" && (
               <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">Google AI Studio API key</label>
-                  <input type="password" value={local.geminiApiKey} onChange={(e) => set("geminiApiKey", e.target.value)}
-                    placeholder="AIza…"
-                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500" />
-                  <p className="mt-1.5 text-xs text-slate-400">
-                    Get a free key at <span className="text-slate-600 font-medium">aistudio.google.com</span>
-                  </p>
-                </div>
+                <p className="text-xs text-slate-400 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                  Gemini key is read server-side from <code className="text-slate-600">GEMINI_API_KEY</code> or <code className="text-slate-600">GOOGLE_API_KEY</code>.
+                </p>
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-medium text-slate-500">Model</label>
@@ -495,7 +492,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                   ) : (
                     <select value={local.geminiModel} onChange={(e) => set("geminiModel", e.target.value)}
                       className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
-                      <option value="">{modelsLoading ? "Fetching…" : models.length === 0 ? "Enter API key and click Fetch" : "Select a model"}</option>
+                      <option value="">{modelsLoading ? "Fetching…" : models.length === 0 ? "Set server API key and click Fetch" : "Select a model"}</option>
                       {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
                   )}
@@ -515,29 +512,9 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
               <h3 className="text-sm font-semibold text-slate-700">Web Search <span className="text-slate-400 font-normal">(Optional)</span></h3>
             </div>
 
-            <p className="text-xs text-slate-400 mb-3">
-              Enable the <strong className="text-slate-500">+ Web</strong> toggle in chat to mix RAG results with live web search.
-              Free key at <span className="text-slate-600 font-medium">app.tavily.com</span>
+            <p className="text-xs text-slate-400 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+              Enable the <strong className="text-slate-500">+ Web</strong> toggle in chat to mix RAG results with live web search. Tavily is read server-side from <code className="text-slate-600">TAVILY_API_KEY</code>.
             </p>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1.5">Tavily API key</label>
-              <input
-                type="password"
-                value={local.tavilyApiKey ?? ""}
-                onChange={(e) => set("tavilyApiKey", e.target.value)}
-                placeholder="tvly-…"
-                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
-              {local.tavilyApiKey && (
-                <p className="mt-1.5 text-xs text-emerald-600 flex items-center gap-1">
-                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm3.707-9.293a1 1 0 0 0-1.414-1.414L9 10.586 7.707 9.293a1 1 0 0 0-1.414 1.414l2 2a1 1 0 0 0 1.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  Web search enabled — use the "+ Web" toggle in chat
-                </p>
-              )}
-            </div>
           </section>
 
           {/* ── Status ── */}

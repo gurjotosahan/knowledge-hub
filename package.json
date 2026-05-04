@@ -10,8 +10,10 @@
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.27.2",
+    "jspdf": "^4.2.1",
     "jszip": "^3.10.1",
     "next": "14.2.5",
+    "next-auth": "^4.24.14",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^4.6.82",
     "react": "^18",

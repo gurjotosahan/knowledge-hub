@@ -10,7 +10,6 @@ interface DocumentBrowserProps {
   graphMockMode?: boolean;
   graphTenantId?: string;
   graphClientId?: string;
-  graphClientSecret?: string;
   graphSiteUrl?: string;
   selectedSourceId: string | null;
   onSourceSelect: (source: Source) => void;
@@ -54,7 +53,6 @@ export default function DocumentBrowser({
   graphMockMode = true,
   graphTenantId = "",
   graphClientId = "",
-  graphClientSecret = "",
   graphSiteUrl = "",
   selectedSourceId,
   onSourceSelect,
@@ -96,7 +94,6 @@ export default function DocumentBrowser({
       if (!graphMockMode) {
         if (graphTenantId)     params.set("tenantId",     graphTenantId);
         if (graphClientId)     params.set("clientId",     graphClientId);
-        if (graphClientSecret) params.set("clientSecret", graphClientSecret);
         if (graphSiteUrl)      params.set("siteUrl",      graphSiteUrl);
       }
       url = `/api/graph/files?${params}`;
@@ -185,7 +182,6 @@ export default function DocumentBrowser({
           mockMode: graphMockMode,
           tenantId: graphTenantId,
           clientId: graphClientId,
-          clientSecret: graphClientSecret,
           siteUrl: graphSiteUrl,
           ollamaBaseUrl,
           embedModel: ollamaEmbedModel,

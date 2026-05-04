@@ -9,7 +9,9 @@ export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const provider = searchParams.get("provider") ?? "ollama";
   const baseUrl  = searchParams.get("baseUrl") ?? "http://localhost:11434";
-  const apiKey   = searchParams.get("apiKey") ?? "";
+  const apiKey   = provider === "gemini"
+    ? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? ""
+    : process.env.OPENROUTER_API_KEY ?? "";
 
   if (provider === "ollama") {
     try {
@@ -32,6 +34,12 @@ export async function GET(req: NextRequest) {
   }
 
   if (provider === "openrouter") {
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing OPENROUTER_API_KEY in .env.local. Add it and restart the dev server." },
+        { status: 400 }
+      );
+    }
     try {
       const res = await fetch("https://openrouter.ai/api/v1/models", {
         headers: { Authorization: `Bearer ${apiKey}` },
@@ -61,6 +69,12 @@ export async function GET(req: NextRequest) {
   }
 
   if (provider === "gemini") {
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing GEMINI_API_KEY or GOOGLE_API_KEY in .env.local. Add it and restart the dev server." },
+        { status: 400 }
+      );
+    }
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,

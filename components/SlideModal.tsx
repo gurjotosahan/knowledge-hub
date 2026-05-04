@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SlideData } from "@/types";
 import SlideRenderer from "./SlideRenderer";
 import PdfPageCanvas from "./PdfPageCanvas";
+import PptxSlideView from "./PptxSlideView";
 
 // SlideRenderer design canvas
 const DESIGN_W = 640;
@@ -14,10 +15,11 @@ const MODAL_W = 1120;
 const MODAL_MAX_H = "calc(100vh - 140px)";
 
 export type ModalContent =
-  | { kind: "rendered"; data: SlideData; number: number }
-  | { kind: "image";    url: string }
-  | { kind: "pdf";      fileUrl: string; pageNumber: number }
-  | { kind: "pptx";     text: string };
+  | { kind: "rendered";   data: SlideData; number: number }
+  | { kind: "image";      url: string }
+  | { kind: "pdf";        fileUrl: string; pageNumber: number }
+  | { kind: "pptx";       text: string }
+  | { kind: "pptx-view";  filePath: string; slideNumber: number };
 
 interface Props {
   content: ModalContent;
@@ -140,6 +142,16 @@ export default function SlideModal({
 
           {content.kind === "pptx" && (
             <PptxCard text={content.text} />
+          )}
+
+          {content.kind === "pptx-view" && (
+            <div style={{ width: "100%", height: "100%" }}>
+              <PptxSlideView
+                filePath={content.filePath}
+                slideNumber={content.slideNumber}
+                displayWidth={renderWidth}
+              />
+            </div>
           )}
         </div>
 

@@ -9,6 +9,7 @@ import {
   type AgentConfig,
   type WebResult,
 } from "@/lib/rag/agent";
+import { resolveAiConfig } from "@/lib/serverConfig";
 import type { RetrievedChunk } from "@/lib/rag/retriever";
 import type { ServiceLine } from "@/types";
 
@@ -50,14 +51,62 @@ interface AIResponse {
 
 // ── System prompts ─────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a presales knowledge assistant helping sales engineers and bid teams win deals. Your job is to surface the most persuasive, reusable content from internal RFPs, POVs, and case studies.
+const RESPONSE_FRAMEWORK = `Before answering, silently classify the query into exactly one primary category:
+1. CAPABILITIES — what we can do, product/service features, differentiators, tech stack, integrations.
+2. CASE_STUDIES — customer proof, wins, ROI, references, similar clients, industry outcomes.
+3. PROCESS — delivery methodology, engagement model, phases, onboarding, how work gets done.
+4. COMPETITIVE — competitors, objections, alternatives, comparisons, battlecards.
+5. PRICING — commercials, pricing model, deal structure, ROI/business case, packaging.
+6. GTM_ICP — target accounts, personas, verticals, ICP, campaigns, outbound plays.
+7. RFP_PROPOSAL — ready-to-paste proposal/RFP answers, boilerplate, compliance responses.
+
+Use the matching response format. Do not mix formats unless the query clearly spans categories; then lead with the primary category and add one short secondary note.
+
+CAPABILITIES format:
+- answer: one-line summary, then "Technical depth:" and "Differentiator:" when supported.
+- keyPoints: 3-5 concrete key features plus 2-3 related capabilities if available.
+
+CASE_STUDIES format:
+- answer: lead with the best match and why it matches.
+- keyPoints: snapshot cards written compactly as "Client | Industry | Challenge | Solution | Outcome | Assets available"; if no exact match, state the closest adjacent match and the gap.
+- metrics: quantified outcomes only.
+
+PROCESS format:
+- answer: process name and context.
+- keyPoints: numbered phase breakdown with phase name, what happens, duration, deliverable; include roles, FAQs, and watch-outs only when supported.
+
+COMPETITIVE format:
+- answer: competitor named or "General objection", their claimed strength, and our counter-position.
+- keyPoints: where we win, where they may win, suggested talk track, trap questions.
+
+PRICING format:
+- answer: pricing model summary and value framing.
+- keyPoints: packages, deal levers, approval requirements, what not to say.
+- metrics: ROI/payback/cost figures only when sourced.
+
+GTM_ICP format:
+- answer: target profile and recommended play.
+- keyPoints: primary persona, secondary persona, qualifying signals, disqualifying signals, messaging hook.
+
+RFP_PROPOSAL format:
+- answer: direct third-person answer ready to paste, plus short/standard/extended variants when requested or useful.
+- keyPoints: key claims to verify, related sections, compliance notes.
+
+General response rules:
+- Never fabricate facts, numbers, case study details, pricing, certifications, or claims.
+- If the knowledge base does not contain the information, say so clearly and suggest the closest place/person to verify if evident from context.
+- Lead with the answer, not background.
+- Avoid generic filler phrases and marketing adjectives unless backed by a specific sourced claim.`;
+
+const SYSTEM_PROMPT = `You are an intelligent Knowledge Management assistant built for Sales, PreSales, and Go-to-Market teams. Your job is to retrieve, synthesize, and present knowledge in the most actionable format for the person asking.
+
+${RESPONSE_FRAMEWORK}
 
 Respond with ONLY valid JSON — no markdown fences, no text outside the JSON:
 {
-  "answer": "2-4 sentence executive summary of what the documents say about this topic, written in client-ready language",
+  "answer": "category-formatted answer with inline citation markers like [1] or [2] placed immediately after each supported claim",
   "keyPoints": [
-    "Reusable bullet point suitable for a proposal or capability deck",
-    "Another win theme or differentiator pulled from the documents"
+    "category-specific supporting bullet from the selected format"
   ],
   "metrics": [
     "Specific quantified outcome, e.g. '40% reduction in processing time for a tier-1 bank'",
@@ -69,21 +118,26 @@ Respond with ONLY valid JSON — no markdown fences, no text outside the JSON:
 }
 
 Rules:
-- "answer" must be polished prose a presales lead could paste into an executive summary
-- "keyPoints" are client-ready bullets (capability statements, differentiators, win themes) — 2-5 items
+- Insert inline citation markers [1], [2], [3], etc. directly after each claim in "answer" — the number maps to the 1-based index of the citation in the "citations" array
 - "metrics" are ONLY hard numbers/percentages/timelines from the documents — omit if none found, do NOT fabricate
+- If the question names a client, company, product, or project, answer ONLY from chunks that explicitly mention that named entity OR from slides/pages in a deck/file whose overall content or filename establishes that entity as the client/prospect
+- Do NOT use proof points from other clients/entities as analogies or filler for a named-entity question
+- Keep "keyPoints" factual and source-specific; omit generic capability bullets that are not directly supported by the cited chunks
+- Never mention implementation terms like "document chunks", "chunks", "retrieved context", "context window", or "knowledge base excerpts" in the answer
 - "file" must be the exact filename as provided (including extension)
 - "slide" is the page or slide number (integer)
 - Only cite chunks that directly support a claim
 - If no relevant content exists, set answer to "No relevant content found in the indexed documents." and all arrays to []`;
 
-const MIXED_SYSTEM_PROMPT = `You are a presales knowledge assistant with access to BOTH internal enterprise documents AND live web search results.
+const MIXED_SYSTEM_PROMPT = `You are an intelligent Knowledge Management assistant built for Sales, PreSales, and Go-to-Market teams with access to BOTH internal enterprise documents AND live web search results.
+
+${RESPONSE_FRAMEWORK}
 
 Respond with ONLY valid JSON — no markdown fences, no text outside the JSON:
 {
-  "answer": "2-4 sentence executive summary synthesizing internal documents and web findings",
+  "answer": "category-formatted answer synthesizing internal documents and web findings, with inline citation markers like [1] or [2] placed immediately after each supported claim",
   "keyPoints": [
-    "Client-ready bullet from either internal docs or web"
+    "category-specific supporting bullet from either internal docs or web"
   ],
   "metrics": [
     "Hard quantified proof point from either source — only real numbers, do NOT fabricate"
@@ -98,9 +152,14 @@ Rules:
 - "sourceType" MUST be either "rag" (internal document) or "web" (web search result)
 - For rag: include "file" (exact filename) and "slide" (page/slide number)
 - For web: include "url" and "title" — never include "file" or "slide"
+- Insert inline citation markers [1], [2], [3], etc. directly after each claim in "answer" — the number maps to the 1-based index of the citation in the "citations" array
 - Prefer internal documents for proprietary metrics and client-specific proof points
 - Use web results for market context, industry trends, and public benchmarks
 - Synthesize both sources in the answer — do NOT treat them separately
+- If the question names a client, company, product, or project, answer ONLY from sources that explicitly mention that named entity OR from slides/pages in a deck/file whose overall content or filename establishes that entity as the client/prospect
+- Do NOT use proof points from other clients/entities as analogies or filler for a named-entity question
+- Keep "keyPoints" factual and source-specific; omit generic capability bullets that are not directly supported by the cited sources
+- Never mention implementation terms like "document chunks", "chunks", "retrieved context", "context window", or "knowledge base excerpts" in the answer
 - If no relevant content, set answer to "No relevant content found." and all arrays to []`;
 
 const HYDE_PROMPT = `Write 2-3 sentences from an enterprise consulting proposal or RFP response that directly answers the question below. Include specific metrics, client outcomes, or capability statements. Use formal presales language. Output only the passage, nothing else.
@@ -117,6 +176,80 @@ Output ONLY a JSON array of exactly 2 strings. No explanation, no markdown.
 User query: `;
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai";
+
+const ENTITY_STOPWORDS = new Set([
+  "AI", "API", "ROI", "RFP", "POV", "PPTX", "PDF", "LLM", "ML", "GenAI", "Apexon",
+]);
+
+function normalizeEntityToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function extractEntityTerms(query: string): string[] {
+  const terms = new Set<string>();
+  for (const match of query.matchAll(/\b[A-Z][A-Z0-9&.-]{2,}\b/g)) {
+    const term = match[0].replace(/[?.!,;:]+$/g, "");
+    if (!ENTITY_STOPWORDS.has(term)) terms.add(term);
+  }
+  for (const match of query.matchAll(/\b(?:for|from|about|at|with|as|by)\s+([A-Z][A-Za-z0-9&.-]{2,}(?:\s+[A-Z][A-Za-z0-9&.-]{2,}){0,3})/g)) {
+    const phrase = match[1].replace(/[?.!,;:]+$/g, "").trim();
+    if (!ENTITY_STOPWORDS.has(phrase)) terms.add(phrase);
+  }
+  return [...terms];
+}
+
+function mentionsEntity(text: string, entity: string): boolean {
+  const normalizedText = normalizeEntityToken(text);
+  const normalizedEntity = normalizeEntityToken(entity);
+  return normalizedEntity.length > 1 && normalizedText.includes(normalizedEntity);
+}
+
+function filterByNamedEntities<T extends { fileName?: string; title?: string; filePath?: string; text?: string; content?: string }>(
+  items: T[],
+  entityTerms: string[]
+): T[] {
+  if (entityTerms.length === 0) return items;
+  const filtered = items.filter((item) => {
+    const haystack = [item.fileName, item.title, item.filePath, item.text, item.content].filter(Boolean).join(" ");
+    return entityTerms.some((entity) => mentionsEntity(haystack, entity));
+  });
+  return filtered.length > 0 ? filtered : [];
+}
+
+async function filterChunksByNamedEntitiesWithDeckContext(
+  chunks: RetrievedChunk[],
+  entityTerms: string[],
+  sourceKey: string
+): Promise<RetrievedChunk[]> {
+  if (entityTerms.length === 0) return chunks;
+
+  const deckEntityCache = new Map<string, boolean>();
+  const matchesDeckContext = async (chunk: RetrievedChunk): Promise<boolean> => {
+    const fileScope = [chunk.fileName, chunk.filePath].filter(Boolean).join(" ");
+    if (entityTerms.some((entity) => mentionsEntity(fileScope, entity))) return true;
+
+    const cached = deckEntityCache.get(chunk.filePath);
+    if (cached !== undefined) return cached;
+
+    const fileChunks = await fetchFileParents(sourceKey, chunk.filePath).catch(() => []);
+    const fullDeckText = [
+      chunk.fileName,
+      chunk.filePath,
+      ...fileChunks.map((c) => c.text),
+    ].join(" ");
+    const deckMatches = entityTerms.some((entity) => mentionsEntity(fullDeckText, entity));
+    deckEntityCache.set(chunk.filePath, deckMatches);
+    return deckMatches;
+  };
+
+  const checks = await Promise.all(chunks.map(async (chunk) => {
+    const localContext = [chunk.fileName, chunk.filePath, chunk.text].filter(Boolean).join(" ");
+    const directMatch = entityTerms.some((entity) => mentionsEntity(localContext, entity));
+    return directMatch || await matchesDeckContext(chunk);
+  }));
+
+  return chunks.filter((_, index) => checks[index]);
+}
 
 // ── Fallback helpers (used when model doesn't support tool calling) ────────────
 
@@ -238,6 +371,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { query, aiProvider } = body;
+  const entityTerms = extractEntityTerms(query);
   const sourceKey = body.sourceKey ?? body.folderPath ?? "";
   if (!query || !sourceKey) {
     return NextResponse.json({ error: "Missing query or sourceKey" }, { status: 400 });
@@ -252,24 +386,36 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const ollamaBase    = body.ollamaBaseUrl ?? "http://localhost:11434";
-  const embedModel    = body.ollamaEmbedModel ?? indexMeta.embedModel ?? "bge-large";
-  const embedProvider = body.embeddingProvider ?? "ollama";
-  const googleApiKey  = body.geminiApiKey ?? "";
-
-  const agentConfig: AgentConfig = {
-    aiProvider,
-    ollamaBaseUrl:    body.ollamaBaseUrl,
-    ollamaModel:      body.ollamaModel,
-    ollamaEmbedModel: embedModel,
-    openrouterApiKey: body.openrouterApiKey,
-    openrouterModel:  body.openrouterModel,
-    geminiApiKey:     body.geminiApiKey,
-    geminiModel:      body.geminiModel,
-    embeddingProvider: embedProvider,
-    tavilyApiKey:     body.tavilyApiKey,
-    searchMode:       body.searchMode,
+  const agentConfig: AgentConfig = resolveAiConfig({
+    ...body,
+    ollamaEmbedModel: body.ollamaEmbedModel ?? indexMeta.embedModel,
+  });
+  const resolvedBody: QueryBody = {
+    ...body,
+    ollamaBaseUrl:     agentConfig.ollamaBaseUrl,
+    ollamaModel:       agentConfig.ollamaModel,
+    ollamaEmbedModel:  agentConfig.ollamaEmbedModel,
+    openrouterApiKey:  agentConfig.openrouterApiKey,
+    openrouterModel:   agentConfig.openrouterModel,
+    geminiApiKey:      agentConfig.geminiApiKey,
+    geminiModel:       agentConfig.geminiModel,
+    embeddingProvider: agentConfig.embeddingProvider,
+    tavilyApiKey:      agentConfig.tavilyApiKey,
   };
+  const ollamaBase = agentConfig.ollamaBaseUrl ?? "http://localhost:11434";
+
+  if (aiProvider === "openrouter" && !resolvedBody.openrouterApiKey) {
+    return NextResponse.json(
+      { error: "Missing OPENROUTER_API_KEY in .env.local. Add the key, then restart the Next.js dev server." },
+      { status: 400 }
+    );
+  }
+  if (aiProvider === "gemini" && !resolvedBody.geminiApiKey) {
+    return NextResponse.json(
+      { error: "Missing GEMINI_API_KEY or GOOGLE_API_KEY in .env.local. Add the key, then restart the Next.js dev server." },
+      { status: 400 }
+    );
+  }
 
   // ── 2. Retrieve context — agent first, fallback to hybrid pipeline ──────────
   let contextChunks: RetrievedChunk[];
@@ -286,18 +432,18 @@ export async function POST(req: NextRequest) {
 
   if (agentResult.usedAgent) {
     // Agent successfully called tools — use its results
-    contextChunks = agentResult.chunks.slice(0, 8);
-    webResults    = agentResult.webResults;
+    contextChunks = (await filterChunksByNamedEntitiesWithDeckContext(agentResult.chunks, entityTerms, sourceKey)).slice(0, 8);
+    webResults    = filterByNamedEntities(agentResult.webResults, entityTerms);
     agentLog      = agentResult.log;
     console.log(`[Agent] ${agentLog.length} tool calls across ${new Set(agentLog.map(l => l.iteration)).size} iterations, ${contextChunks.length} chunks, ${webResults.length} web results`);
   } else {
     // Fallback: existing HyDE + multi-query hybrid pipeline
     console.log("[Agent] Model doesn't support tool calling — using hybrid fallback");
     const [hypothetical, alternatives] = await Promise.all([
-      generateHypotheticalPassage(query, body, ollamaBase).catch(() => ""),
-      generateAlternativeQueries(query, body, ollamaBase).catch(() => [] as string[]),
+      generateHypotheticalPassage(query, resolvedBody, ollamaBase).catch(() => ""),
+      generateAlternativeQueries(query, resolvedBody, ollamaBase).catch(() => [] as string[]),
     ]);
-    const queryVariants: string[] = [hypothetical || query, ...alternatives];
+    const queryVariants: string[] = [...new Set([query, hypothetical, ...alternatives].filter(Boolean))];
 
     const embeddingResults = await Promise.allSettled(
       queryVariants.map((q) => getEmbedding(q, agentConfig))
@@ -311,8 +457,8 @@ export async function POST(req: NextRequest) {
           return retrieve(q, emb, sourceKey, 12, i === 0 ? (hypothetical || undefined) : undefined);
         })
       ),
-      body.searchMode === "mixed" && body.tavilyApiKey
-        ? searchWeb(query, body.tavilyApiKey).catch(() => [] as WebResult[])
+      resolvedBody.searchMode === "mixed" && resolvedBody.tavilyApiKey
+        ? searchWeb(query, resolvedBody.tavilyApiKey).catch(() => [] as WebResult[])
         : Promise.resolve([] as WebResult[]),
     ]);
 
@@ -320,19 +466,24 @@ export async function POST(req: NextRequest) {
       .filter((r): r is PromiseFulfilledResult<RetrievedChunk[]> => r.status === "fulfilled")
       .map((r) => r.value);
 
-    contextChunks = crossQueryRRF(allRetrievals, 12).slice(0, 5);
-    webResults    = fallbackWebResults;
+    contextChunks = (await filterChunksByNamedEntitiesWithDeckContext(crossQueryRRF(allRetrievals, 12), entityTerms, sourceKey)).slice(0, 5);
+    webResults    = filterByNamedEntities(fallbackWebResults, entityTerms);
   }
 
   // Safety net: if internal search found nothing AND a Tavily key exists, always try web.
   // Fires regardless of searchMode — zero internal results is always a good reason to check the web.
-  if (contextChunks.length === 0 && webResults.length === 0 && body.tavilyApiKey) {
+  if (contextChunks.length === 0 && webResults.length === 0 && resolvedBody.tavilyApiKey) {
     console.log("[Agent] Safety net: zero internal results, falling back to web search");
-    webResults = await searchWeb(query, body.tavilyApiKey).catch(() => []);
+    webResults = filterByNamedEntities(
+      await searchWeb(query, resolvedBody.tavilyApiKey).catch(() => []),
+      entityTerms
+    );
   }
 
   if (contextChunks.length === 0 && webResults.length === 0) {
-    const hint = body.tavilyApiKey
+    const hint = entityTerms.length
+      ? `No relevant content found that explicitly mentions ${entityTerms.join(", ")}.`
+      : resolvedBody.tavilyApiKey
       ? "No relevant content found in your documents or the web for this query."
       : "No matching documents found. Add a Tavily API key in Settings to also search the internet.";
     return NextResponse.json({ answer: hint, sources: [], documents: [] });
@@ -361,7 +512,10 @@ export async function POST(req: NextRequest) {
   const messages = [
     { role: "system", content: systemPrompt },
     ...history,
-    { role: "user", content: `Document chunks:\n---\n${fullContext}\n---\n\nQuestion: ${query}` },
+    {
+      role: "user",
+      content: `Source excerpts for grounding:\n---\n${fullContext}\n---\n\n${entityTerms.length ? `Named entity constraint: Use evidence that explicitly mentions ${entityTerms.join(", ")} OR evidence from a deck/file whose overall context establishes ${entityTerms.join(", ")} as the client/prospect. Do not use proof points from unrelated clients. If the provided source excerpts do not answer the question for that entity, return no relevant content.\n\n` : ""}Question: ${query}`,
+    },
   ];
 
   // ── 4. Synthesize — single structured LLM call ──────────────────────────────
@@ -372,8 +526,8 @@ export async function POST(req: NextRequest) {
       const res = await fetch(`${ollamaBase}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: body.ollamaModel, messages, stream: false, format: "json" }),
-        signal: AbortSignal.timeout(180_000),
+        body: JSON.stringify({ model: resolvedBody.ollamaModel, messages, stream: false, format: "json", options: { num_predict: 2048 } }),
+        signal: AbortSignal.timeout(75_000),
       });
       if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`);
       const data = await res.json();
@@ -382,8 +536,8 @@ export async function POST(req: NextRequest) {
     } else {
       const [url, authHeader, model] =
         aiProvider === "gemini"
-          ? [`${GEMINI_BASE}/chat/completions`, `Bearer ${body.geminiApiKey}`, body.geminiModel]
-          : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${body.openrouterApiKey}`, body.openrouterModel];
+          ? [`${GEMINI_BASE}/chat/completions`, `Bearer ${resolvedBody.geminiApiKey}`, resolvedBody.geminiModel]
+          : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${resolvedBody.openrouterApiKey}`, resolvedBody.openrouterModel];
 
       const res = await fetch(url, {
         method: "POST",
@@ -398,12 +552,13 @@ export async function POST(req: NextRequest) {
         body: JSON.stringify({
           model,
           messages,
+          max_tokens: 2048,
           // response_format omitted — many OSS models on OpenRouter return empty content when
           // they don't support json_object mode. The system prompt instructs JSON output and
           // extractAIResponse handles all formats (raw JSON, markdown-fenced, partial, etc.)
           ...(aiProvider === "gemini" && { response_format: { type: "json_object" } }),
         }),
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(55_000),
       });
       if (!res.ok) {
         const errBody = await res.text();
@@ -413,7 +568,9 @@ export async function POST(req: NextRequest) {
             ? "Gemini quota exceeded. Switch to gemini-2.0-flash in Settings or wait for your quota to reset."
             : "Rate limit hit. Please wait a moment and try again.";
         } else if (res.status === 401 || res.status === 403) {
-          friendly = "Invalid API key. Check your key in Settings.";
+          friendly = aiProvider === "gemini"
+            ? "Invalid Gemini API key. Check GEMINI_API_KEY or GOOGLE_API_KEY in .env.local, then restart the dev server."
+            : "Invalid OpenRouter API key. Check OPENROUTER_API_KEY in .env.local, then restart the dev server.";
         }
         throw new Error(friendly + (res.status !== 429 ? `\n\nDetails: ${errBody}` : ""));
       }

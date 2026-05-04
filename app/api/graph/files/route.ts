@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listChildren } from "@/lib/graph/client";
+import { resolveGraphSecret } from "@/lib/serverConfig";
 import type { GraphConfig } from "@/lib/graph/types";
 import type { LocalSourceEntry } from "@/types";
 
@@ -16,7 +17,7 @@ export async function GET(req: NextRequest) {
     driveId,
     tenantId:     p.get("tenantId")     ?? "",
     clientId:     p.get("clientId")     ?? "",
-    clientSecret: p.get("clientSecret") ?? "",
+    clientSecret: resolveGraphSecret(),
     siteUrl:      p.get("siteUrl")      ?? "",
   };
 

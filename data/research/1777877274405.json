@@ -1,0 +1,16 @@
+{
+  "id": "1777877274405",
+  "clientName": "syneos health",
+  "createdAt": "2026-05-04T06:47:54.405Z",
+  "selectedSections": [
+    "snapshot"
+  ],
+  "sections": [
+    {
+      "id": "snapshot",
+      "title": "Company Snapshot",
+      "emoji": "💊",
+      "content": "**Syneos Health** is the only fully integrated biopharmaceutical solutions organization, combining a **contract research organization (CRO)** and **commercial services** provider. The company’s scale, data-rich operations, and recent leadership overhaul create urgent IT modernization opportunities.\n\n- **Industry & Model**: End-to-end clinical and commercial services for pharma/biotech — from Phase I trials to post-launch real-world evidence. Privately held, with **$2.2B in funding** (ZoomInfo), driving a need for operational efficiency and data-driven decision-making.\n- **Scale**: ~**23K employees** across 6 continents; annual revenue estimated at **$5B** (LeadIQ) to **$7.4B** (ZoomInfo). This global footprint demands **cloud-native collaboration, unified data platforms, and robust cybersecurity**.\n- **Leadership Reshuffle**: **Costa Panagos** appointed CEO in Oct 2024; Chairman **Colin Shannon** (former PRA Health Sciences CEO) stepped in same quarter. **Michael Bonello** (ex-Clario, PRA) became CFO in July 2023, **Simon Bartle** joined as CHRO in 2026. C-suite changes often signal a new strategic agenda — and fresh appetite for **digital transformation investments**.\n- **CIO & Technology Posture**: **Michael Wilkinson** serves as CIO. The company’s rapid M&A history (INC Research/inVentiv merger, post-PRA executive influx) suggests inherited **legacy systems, data silos, and integration debt** that IT services can address.\n- **Sales Intelligence**: Recent appointments include a VP of Commercial Solutions (Voyles’ departure/backfill) and a President of Advertising, North America — indicating focus on **digital commercial offerings**, predictive analytics, and customer engagement platforms.\n- **Key Opportunities**: (1) **Cloud-based clinical data management & analytics** to unify trial, regulatory, and real-world data; (2) **AI/ML solutions** for patient recruitment, site selection, and risk monitoring; (3) **Cybersecurity & compliance** for HIPAA, GDPR, and FDA 21 CFR Part 11; (4) **Modern workplace & collaboration** tools for 23K dispersed employees; (5) **Application rationalization** post-M&A to cut costs. Engage CIO Wilkinson and newly hired digital leaders with a proposal grounded in life-sciences domain expertise."
+    }
+  ]
+}

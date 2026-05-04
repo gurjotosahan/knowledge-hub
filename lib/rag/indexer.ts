@@ -37,6 +37,7 @@ const PARENT_CHARS   = 1600;
 const PARENT_OVERLAP = 200;
 const CHILD_CHARS    = 400;
 const CHILD_OVERLAP  = 60;
+const EMBED_CONCURRENCY = 6;
 
 function splitText(text: string, chunkSize: number, overlap: number): string[] {
   const trimmed = text.trim();
@@ -121,6 +122,27 @@ async function embedText(
   return (data.embeddings?.[0] as number[]) ?? [];
 }
 
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  async function run(): Promise<void> {
+    while (next < items.length) {
+      const current = next++;
+      results[current] = await worker(items[current], current);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => run())
+  );
+  return results;
+}
+
 // ── Shared core ───────────────────────────────────────────────────────────────
 
 export async function indexExtractedDocs(
@@ -133,10 +155,11 @@ export async function indexExtractedDocs(
   googleApiKey = ""
 ): Promise<{ chunks: number; files: number }> {
   const chunks: RagChunk[] = [];
+  const childrenToEmbed: RagChunk[] = [];
 
   for (let fi = 0; fi < docs.length; fi++) {
     const doc = docs[fi];
-    onProgress(`[${fi + 1}/${docs.length}] Embedding ${doc.fileName}…`);
+    onProgress(`[${fi + 1}/${docs.length}] Chunking ${doc.fileName}...`);
 
     for (const slide of doc.slides) {
       if (!slide.text?.trim()) continue;
@@ -146,14 +169,26 @@ export async function indexExtractedDocs(
         chunks.push(parent as RagChunk);
         for (const child of children) {
           const c: RagChunk = { ...child };
-          try {
-            c.embedding = await embedText(child.text, ollamaBaseUrl, embedModel, embeddingProvider, googleApiKey);
-          } catch { /* keyword fallback */ }
+          childrenToEmbed.push(c);
           chunks.push(c);
         }
       }
     }
   }
+
+  let embedded = 0;
+  onProgress(`Embedding ${childrenToEmbed.length} child chunks (${EMBED_CONCURRENCY} at a time)...`);
+  await mapConcurrent(childrenToEmbed, EMBED_CONCURRENCY, async (chunk) => {
+    try {
+      chunk.embedding = await embedText(chunk.text, ollamaBaseUrl, embedModel, embeddingProvider, googleApiKey);
+    } catch {
+      // Keyword retrieval still works when an individual embedding fails.
+    }
+    embedded++;
+    if (embedded % 25 === 0 || embedded === childrenToEmbed.length) {
+      onProgress(`Embedded ${embedded}/${childrenToEmbed.length} chunks`);
+    }
+  });
 
   const parentCount = chunks.filter((c) => c.level === "parent").length;
   const fileNames = new Set(chunks.map((c) => c.fileName));
