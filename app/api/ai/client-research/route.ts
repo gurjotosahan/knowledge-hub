@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { searchWeb } from "@/lib/rag/agent";
 import { saveResearch } from "@/lib/researchStorage";
 import { RESEARCH_SECTIONS } from "@/types/research";
-import type { SavedResearch, ResearchSectionResult } from "@/types/research";
+import type { ResearchSectionDef, SavedResearch, ResearchSectionResult } from "@/types/research";
 import type { AgentConfig } from "@/lib/rag/agent";
 import { resolveAiConfig } from "@/lib/serverConfig";
 
@@ -134,12 +134,20 @@ async function runAgenticResearch(
   clientName: string,
   selectedSections: string[],
   followUpQuery: string | undefined,
+  researchSections: ResearchSectionDef[],
   config: AgentConfig,
   tavilyApiKey: string | undefined,
   onProgress: (msg: string) => void
 ): Promise<ResearchSectionResult[]> {
-  const defs = RESEARCH_SECTIONS.filter((s) => selectedSections.includes(s.id));
-  const sectionList = defs.map((d) => `{ "id": "${d.id}", "title": "${d.title}" }`).join(", ");
+  const defs = researchSections.filter((s) => selectedSections.includes(s.id));
+  const sectionList = defs.map((d) => JSON.stringify({
+    id: d.id,
+    title: d.title,
+    emoji: d.emoji,
+    description: d.description,
+    searchQuery: d.searchQueryTemplate.replaceAll("{{client}}", clientName),
+    outputPrompt: d.prompt,
+  })).join(", ");
 
   const messages: Message[] = [
     { role: "system", content: APEXON_SYSTEM_PROMPT },
@@ -153,11 +161,12 @@ Generate an Apexon-focused presales intelligence report for these sections:
 ${followUpQuery ? `Analyst's specific question: "${followUpQuery}"` : ""}
 
 INSTRUCTIONS:
-1. ${tavilyApiKey ? "Use the search_web tool to gather real-time intelligence. Run at least 6-8 targeted searches across different topics (strategy, technology, challenges, leadership, competitors, recent news)." : "Use your training knowledge to research this company thoroughly."}
+1. ${tavilyApiKey ? "Use the search_web tool to gather real-time intelligence. Start from the searchQuery provided for each selected section, then run additional targeted searches when needed." : "Use your training knowledge to research this company thoroughly."}
 2. After gathering intelligence, synthesize findings into each requested section.
-3. For EVERY section, explicitly connect findings to Apexon service opportunities.
-4. Be specific — cite real facts, name real executives, reference real initiatives.
-5. The "hypothesis" and "engagement" sections MUST name specific Apexon service lines.
+3. Follow each section's outputPrompt exactly; it is the admin-defined instruction for that module.
+4. For EVERY section, explicitly connect findings to Apexon service opportunities.
+5. Be specific — cite real facts, name real executives, reference real initiatives.
+6. The "hypothesis" and "engagement" sections MUST name specific Apexon service lines when those sections are requested.
 
 Return JSON:
 {
@@ -236,6 +245,7 @@ interface ResearchBody {
   clientName: string;
   selectedSections: string[];
   followUpQuery?: string;
+  researchSections?: ResearchSectionDef[];
   aiProvider: "ollama" | "openrouter" | "gemini";
   ollamaBaseUrl?: string;
   ollamaModel?: string;
@@ -255,6 +265,9 @@ export async function POST(req: NextRequest): Promise<Response> {
   const config: AgentConfig = resolveAiConfig(body);
   const tavilyApiKey = config.tavilyApiKey;
   const encoder = new TextEncoder();
+  const researchSections = Array.isArray(body.researchSections) && body.researchSections.length
+    ? body.researchSections
+    : RESEARCH_SECTIONS;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -273,6 +286,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           clientName.trim(),
           selectedSections,
           followUpQuery,
+          researchSections,
           config,
           tavilyApiKey,
           (msg) => send({ type: "progress", msg })

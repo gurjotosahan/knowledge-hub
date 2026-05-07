@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import type { ServiceLine, AppConfig } from "@/types";
+import Link from "next/link";
+import type { ServiceLine, AppConfig, DocumentCategory } from "@/types";
 import { sidebarItems } from "@/data/mockData";
 import type { ChatSession } from "@/lib/chatStorage";
 import { groupSessionsByDate } from "@/lib/chatStorage";
@@ -9,6 +10,8 @@ import { groupSessionsByDate } from "@/lib/chatStorage";
 interface SidebarProps {
   selectedLine: ServiceLine | null;
   onSelect: (line: ServiceLine | null) => void;
+  selectedCategory: DocumentCategory | null;
+  onSelectCategory: (line: ServiceLine, category: DocumentCategory) => void;
   config: AppConfig;
   onOpenSettings: () => void;
   onGoHome: () => void;
@@ -19,12 +22,16 @@ interface SidebarProps {
   onDeleteSession: (id: string) => void;
   appMode: "knowledge" | "research";
   onSetAppMode: (mode: "knowledge" | "research") => void;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 export default function Sidebar({
   selectedLine, onSelect, config, onOpenSettings, onGoHome, onNewChat,
+  selectedCategory, onSelectCategory,
   sessions, activeSessionId, onSelectSession, onDeleteSession,
   appMode, onSetAppMode,
+  isOpen, onClose,
 }: SidebarProps) {
   const [serviceExpanded, setServiceExpanded] = useState<Record<string, boolean>>({
     BFSI: true,
@@ -38,11 +45,29 @@ export default function Sidebar({
   const toggleService = (label: string) =>
     setServiceExpanded((prev) => ({ ...prev, [label]: !prev[label] }));
 
+  const handleServiceClick = (line: ServiceLine, label: string) => {
+    onSelect(line);
+    toggleService(label);
+    onClose?.();
+  };
+
   const groups = groupSessionsByDate(sessions);
 
   return (
+    <>
+      {/* Mobile backdrop */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={onClose}
+        />
+      )}
     <aside
-      className="flex flex-col h-screen shrink-0 overflow-hidden"
+      className={`flex flex-col h-screen shrink-0 overflow-hidden z-50
+        fixed md:relative top-0 left-0
+        transition-transform duration-300 ease-in-out
+        ${isOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}
+      `}
       style={{ width: 260, backgroundColor: "#0F172A" }}
     >
       {/* ── Logo ── */}
@@ -67,6 +92,20 @@ export default function Sidebar({
         </button>
       </div>
 
+      {/* ── Tools ── */}
+      <div className="px-3 py-2 border-b border-slate-700 shrink-0">
+        <Link
+          href="/slide-composer"
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+        >
+          <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+          </svg>
+          Slide Composer
+        </Link>
+      </div>
+
       {/* ── Services (top, always visible, scrollable) ── */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 min-h-0">
         <p className="px-3 mb-2 text-xs font-semibold uppercase tracking-widest text-slate-500">
@@ -80,19 +119,14 @@ export default function Sidebar({
           return (
             <div key={item.label} className="mb-1">
               <button
-                onClick={() => toggleService(item.label)}
+                onClick={() => handleServiceClick(item.serviceLine, item.label)}
                 className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                   isActive
                     ? "bg-sky-600 text-white"
                     : "text-slate-300 hover:bg-slate-800 hover:text-white"
                 }`}
               >
-                <span
-                  className="cursor-pointer"
-                  onClick={(e) => { e.stopPropagation(); onSelect(isActive ? null : item.serviceLine); }}
-                >
-                  {item.label}
-                </span>
+                <span>{item.label}</span>
                 <svg
                   className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
                   fill="none" viewBox="0 0 24 24" stroke="currentColor"
@@ -106,8 +140,12 @@ export default function Sidebar({
                   {item.children.map((child) => (
                     <button
                       key={child}
-                      onClick={() => onSelect(item.serviceLine)}
-                      className="w-full text-left px-2 py-1.5 rounded text-xs text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                      onClick={() => onSelectCategory(item.serviceLine, child as DocumentCategory)}
+                      className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors ${
+                        isActive && selectedCategory === child
+                          ? "text-white bg-slate-800 ring-1 ring-sky-400"
+                          : "text-slate-400 hover:text-white hover:bg-slate-800"
+                      }`}
                     >
                       {child}
                     </button>
@@ -120,8 +158,8 @@ export default function Sidebar({
 
       </nav>
 
-      {/* ── Recent Chats (collapsible, bottom) ── */}
-      <div className="border-t border-slate-700 shrink-0" style={{ maxHeight: historyOpen ? 360 : "auto" }}>
+      {/* ── Recent Chats (collapsible, middle) ── */}
+      <div className="border-t border-slate-700 shrink-0 flex flex-col" style={{ maxHeight: historyOpen ? 320 : 44 }}>
         {/* Toggle header */}
         <button
           onClick={() => setHistoryOpen((p) => !p)}
@@ -143,53 +181,7 @@ export default function Sidebar({
         </button>
 
         {historyOpen && (
-          <div className="overflow-y-auto px-3 pb-2" style={{ maxHeight: 308 }}>
-
-            {/* ── Client Research entry ── */}
-            <div className="mb-3">
-              <button
-                onClick={() => setResearchOpen((p) => !p)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  appMode === "research"
-                    ? "bg-sky-600 text-white"
-                    : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                }`}
-              >
-                <span
-                  className="flex items-center gap-2"
-                  onClick={(e) => { e.stopPropagation(); onSetAppMode("research"); }}
-                >
-                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                  Client Research
-                </span>
-                <svg
-                  className={`w-3 h-3 shrink-0 transition-transform duration-200 ${researchOpen ? "rotate-90" : ""} ${appMode === "research" ? "text-sky-200" : "text-slate-500"}`}
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
-
-              {researchOpen && (
-                <div className="mt-1 ml-3 pl-3 border-l border-slate-700 space-y-0.5">
-                  {["New Research", "Saved Reports", "Follow-up Chat"].map((child) => (
-                    <button
-                      key={child}
-                      onClick={() => onSetAppMode("research")}
-                      className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors ${
-                        appMode === "research"
-                          ? "text-sky-300 hover:text-white hover:bg-slate-800"
-                          : "text-slate-400 hover:text-white hover:bg-slate-800"
-                      }`}
-                    >
-                      {child}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+          <div className="overflow-y-auto px-3 pb-2" style={{ maxHeight: 276 }}>
 
             {/* ── Chat history groups ── */}
             {groups.map((group) => (
@@ -261,5 +253,6 @@ export default function Sidebar({
         </button>
       </div>
     </aside>
+    </>
   );
 }

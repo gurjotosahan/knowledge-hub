@@ -83,7 +83,10 @@ export async function GET(req: NextRequest) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const models: ModelEntry[] = (data.models ?? [])
-        .filter((m: { name: string }) => m.name.includes("gemini"))
+        .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
+          (m.name.includes("gemini") || m.name.includes("gemma")) &&
+          (m.supportedGenerationMethods ?? []).includes("generateContent")
+        )
         .map((m: { name: string; displayName?: string }) => ({
           id: m.name.replace("models/", ""),
           name: m.displayName ?? m.name.replace("models/", ""),

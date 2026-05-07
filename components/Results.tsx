@@ -110,40 +110,84 @@ export default function Results({
             {/* Executive summary */}
             <p className="text-sm text-slate-700 leading-relaxed">{displayAnswer}</p>
 
-            {/* Metrics — proof points */}
-            {metrics && metrics.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Proof Points</p>
-                <div className="flex flex-wrap gap-2">
-                  {metrics.map((m, i) => (
-                    <span
-                      key={i}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-800"
-                    >
-                      <svg className="w-3 h-3 shrink-0 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                      </svg>
-                      {m}
-                    </span>
-                  ))}
+            {/* Key points — case study cards or reusable bullets */}
+            {keyPoints && keyPoints.length > 0 && (() => {
+              // Detect case study format: "Client | Industry | Challenge | Solution | Outcome | Assets"
+              const isCaseStudy = keyPoints.some((kp) => kp.split("|").length >= 4);
+              if (isCaseStudy) {
+                return (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Case Studies</p>
+                    {keyPoints.map((kp, i) => {
+                      const parts = kp.split("|").map((p) => p.trim());
+                      const [client, industry, challenge, solution, outcome, assets] = parts;
+                      // Extract individual proof points from outcome (split on comma/semicolon/and)
+                      const proofPoints = outcome
+                        ? outcome.split(/[,;]|\band\b/).map((s) => s.trim()).filter((s) => s.length > 4)
+                        : [];
+                      return (
+                        <div key={i} className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col gap-3 shadow-sm">
+                          {/* Header row */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-semibold text-slate-800 leading-snug">{client || `Case Study ${i + 1}`}</p>
+                              {industry && <p className="text-xs text-slate-400 mt-0.5">{industry}</p>}
+                            </div>
+                            {assets && (
+                              <span className="shrink-0 px-2 py-0.5 rounded-full bg-sky-50 border border-sky-100 text-[10px] font-medium text-sky-700">
+                                {assets.replace(/case study/i, "").replace(/\(.*?\)/g, "").trim() || "Asset available"}
+                              </span>
+                            )}
+                          </div>
+                          {/* Challenge / Solution */}
+                          <div className="grid grid-cols-2 gap-3 text-xs">
+                            {challenge && (
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <p className="font-semibold text-slate-500 uppercase tracking-wide text-[10px] mb-1">Challenge</p>
+                                <p className="text-slate-700 leading-relaxed">{challenge}</p>
+                              </div>
+                            )}
+                            {solution && (
+                              <div className="rounded-lg bg-sky-50 px-3 py-2">
+                                <p className="font-semibold text-sky-600 uppercase tracking-wide text-[10px] mb-1">Solution</p>
+                                <p className="text-slate-700 leading-relaxed">{solution}</p>
+                              </div>
+                            )}
+                          </div>
+                          {/* Proof points from outcome */}
+                          {proofPoints.length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Outcomes</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {proofPoints.map((pt, j) => (
+                                  <span key={j} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-[11px] font-medium text-slate-700">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 shrink-0" />
+                                    {pt}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              }
+              return (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Key Points</p>
+                  <ul className="flex flex-col gap-1.5">
+                    {keyPoints.map((kp, i) => (
+                      <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                        <span className="mt-1 w-1.5 h-1.5 rounded-full bg-sky-500 shrink-0" />
+                        {kp}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              </div>
-            )}
-
-            {/* Key points — reusable proposal bullets */}
-            {keyPoints && keyPoints.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Reusable Bullets</p>
-                <ul className="flex flex-col gap-1.5">
-                  {keyPoints.map((kp, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-                      <span className="mt-1 w-1.5 h-1.5 rounded-full bg-sky-500 shrink-0" />
-                      {kp}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Citations */}
             {displaySources.length > 0 && (
@@ -215,7 +259,7 @@ export default function Results({
                       slide: 1,
                       serviceLine: d.serviceLine,
                       filePath: (d as Document & { filePath?: string }).filePath,
-                      fileType: (d as Document & { fileType?: "pdf" | "pptx" }).fileType,
+                      fileType: (d as Document & { fileType?: Source["fileType"] }).fileType,
                     });
                   }}
                   onAskAI={(_, prompt) => {

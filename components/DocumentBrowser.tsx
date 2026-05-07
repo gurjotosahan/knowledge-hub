@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { LocalSourceEntry, Source, SourceType } from "@/types";
+import type { DocumentCategory, LocalSourceEntry, ServiceLine, Source, SourceType } from "@/types";
 
 interface DocumentBrowserProps {
   rootFolder: string;
@@ -11,6 +11,8 @@ interface DocumentBrowserProps {
   graphTenantId?: string;
   graphClientId?: string;
   graphSiteUrl?: string;
+  selectedLine?: ServiceLine | null;
+  selectedCategory?: DocumentCategory | null;
   selectedSourceId: string | null;
   onSourceSelect: (source: Source) => void;
   onAskDocument: (query: string) => void;
@@ -34,7 +36,15 @@ function formatDate(value?: string) {
 }
 
 function titleFromFileName(name: string) {
-  return name.replace(/\.(pdf|pptx)$/i, "").replace(/[-_]/g, " ");
+  return name.replace(/\.(pdf|pptx|docx)$/i, "").replace(/[-_]/g, " ");
+}
+
+function categoryBadge(category?: DocumentCategory | null) {
+  if (category === "RFPs") return "RFP";
+  if (category === "POVs") return "POV";
+  if (category === "Case Studies") return "CASE STUDY";
+  if (category === "Latest Trends") return "TREND";
+  return "DOC";
 }
 
 // Extract Graph driveId + itemId from an encoded path like "graph:{driveId}:{itemId}"
@@ -46,6 +56,15 @@ function parseGraphPath(path: string): { driveId: string; itemId: string } | nul
 
 type IndexState = "idle" | "indexing" | "done" | "error";
 
+const ASK_SUGGESTIONS = [
+  "Summarize the key findings and recommendations",
+  "What metrics and proof points are mentioned?",
+  "List the main differentiators and win themes",
+  "What risks or challenges are highlighted?",
+  "Extract reusable bullets for a proposal",
+  "What client outcomes or case examples are cited?",
+];
+
 export default function DocumentBrowser({
   rootFolder,
   sourceType = "local",
@@ -54,6 +73,8 @@ export default function DocumentBrowser({
   graphTenantId = "",
   graphClientId = "",
   graphSiteUrl = "",
+  selectedLine = null,
+  selectedCategory = null,
   selectedSourceId,
   onSourceSelect,
   onAskDocument,
@@ -76,6 +97,45 @@ export default function DocumentBrowser({
   const [indexState, setIndexState] = useState<IndexState>("idle");
   const [indexMsg, setIndexMsg]     = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const askTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [askEntry, setAskEntry] = useState<LocalSourceEntry | null>(null);
+  const [askPrompt, setAskPrompt] = useState("");
+
+  const categoryMatches = (entry: LocalSourceEntry & { webUrl?: string }): boolean => {
+    if (!selectedCategory) return true;
+    if (entry.kind !== "file") return false;
+    const haystack = `${entry.name} ${entry.path}`.toLowerCase();
+    switch (selectedCategory) {
+      case "RFPs":
+        return /\brfp\b|request[-_\s]?for[-_\s]?proposal|proposal|response/.test(haystack);
+      case "POVs":
+        return /\bpov\b|point[-_\s]?of[-_\s]?view|whitepaper|thought[-_\s]?leadership/.test(haystack);
+      case "Case Studies":
+        return /case[-_\s]?stud(y|ies)|customer[-_\s]?story|success[-_\s]?story|reference|proof[-_\s]?point/.test(haystack);
+      case "Latest Trends":
+        return /trend|insight|market|analyst|forecast|latest|outlook|report/.test(haystack);
+      default:
+        return true;
+    }
+  };
+
+  const serviceMatches = (entry: LocalSourceEntry & { webUrl?: string }): boolean => {
+    if (!selectedLine) return true;
+    const haystack = `${entry.name} ${entry.path}`.toLowerCase();
+    const serviceSignals = {
+      BFSI: /\bbfsi\b|bank|banking|financial|fintech|insurance|lending|payment|wealth|capital[-_\s]?markets/,
+      Healthcare: /healthcare|health[-_\s]?care|provider|payer|hospital|clinical|patient|claims/,
+      "Life Sciences": /life[-_\s]?sciences|lifesciences|pharma|biotech|medical[-_\s]?device|cro|clinical[-_\s]?trial|iqvia/,
+    } satisfies Record<ServiceLine, RegExp>;
+    const hasAnyServiceSignal = Object.values(serviceSignals).some((regex) => regex.test(haystack));
+    return serviceSignals[selectedLine].test(haystack) || !hasAnyServiceSignal;
+  };
+
+  const visibleEntries = useMemo(
+    () => entries.filter((entry) => categoryMatches(entry) && serviceMatches(entry)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [entries, selectedCategory, selectedLine]
+  );
 
   useEffect(() => { if (!isGraph) setFolder(rootFolder); }, [rootFolder, isGraph]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [indexMsg]);
@@ -99,7 +159,9 @@ export default function DocumentBrowser({
       url = `/api/graph/files?${params}`;
     } else {
       if (!folder) { setLoading(false); return; }
-      url = `/api/local/files?folder=${encodeURIComponent(folder)}`;
+      const params = new URLSearchParams({ folder });
+      if (selectedCategory) params.set("recursive", "true");
+      url = `/api/local/files?${params}`;
     }
 
     fetch(url, { signal: controller.signal })
@@ -113,7 +175,7 @@ export default function DocumentBrowser({
 
     return () => controller.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isGraph, folder, graphStack, graphDriveId, graphMockMode, refreshKey]);
+  }, [isGraph, folder, graphStack, graphDriveId, graphMockMode, refreshKey, selectedCategory]);
 
   // ── Local breadcrumbs ─────────────────────────────────────────────────────
   const localPathParts = useMemo(() => {
@@ -162,8 +224,20 @@ export default function DocumentBrowser({
     });
   };
 
-  const askFile = (entry: LocalSourceEntry) => {
-    onAskDocument(`Summarize "${titleFromFileName(entry.name)}" and list the most useful recommendations, proof points, and risks.`);
+  useEffect(() => {
+    if (askEntry) setTimeout(() => askTextareaRef.current?.focus(), 60);
+  }, [askEntry]);
+
+  const closeAsk = () => {
+    setAskEntry(null);
+    setAskPrompt("");
+  };
+
+  const submitAsk = () => {
+    const query = askPrompt.trim();
+    if (!query) return;
+    onAskDocument(query);
+    closeAsk();
   };
 
   // ── Refresh index ─────────────────────────────────────────────────────────
@@ -240,7 +314,9 @@ export default function DocumentBrowser({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-semibold text-slate-800">
-                {isGraph ? "SharePoint Documents" : "Document Source"}
+                {selectedCategory
+                  ? `${selectedLine ?? "All"} ${selectedCategory}`
+                  : isGraph ? "SharePoint Documents" : "Document Source"}
               </h1>
               {isGraph && (
                 <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-100">
@@ -278,7 +354,7 @@ export default function DocumentBrowser({
 
           {/* Action buttons */}
           <div className="flex shrink-0 items-center gap-2">
-            {!isGraph && (
+            {!isGraph && !selectedCategory && (
               <button onClick={() => setFolder(rootFolder)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Root</button>
             )}
             <button onClick={() => setRefreshKey((k) => k + 1)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Refresh</button>
@@ -319,19 +395,78 @@ export default function DocumentBrowser({
             <p className="mt-1 break-all font-mono text-xs text-red-500">{error}</p>
           </div>
         )}
-        {!loading && !error && entries.length === 0 && (
+        {!loading && !error && visibleEntries.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-200 bg-white px-5 py-10 text-center">
-            <p className="text-sm font-semibold text-slate-700">No supported documents found here.</p>
-            <p className="mt-1 text-xs text-slate-400">This browser shows folders plus PDF and PPTX files.</p>
+            <p className="text-sm font-semibold text-slate-700">
+              {selectedCategory ? `No ${selectedCategory.toLowerCase()} documents found.` : "No supported documents found here."}
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              {selectedCategory ? "Matching is based on file names and folder paths." : "This browser shows folders plus PDF and PPTX files."}
+            </p>
           </div>
         )}
-        {!loading && !error && entries.length > 0 && (
+        {!loading && !error && visibleEntries.length > 0 && selectedCategory && (
+          <div>
+            <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Related Documents</p>
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+              {visibleEntries.filter((entry) => entry.kind === "file").map((entry) => {
+                const sourceId = `browse-${entry.path}`;
+                const isSelected = selectedSourceId === sourceId;
+                return (
+                  <article
+                    key={entry.path}
+                    className={`rounded-lg border bg-white p-4 shadow-sm transition-colors ${
+                      isSelected ? "border-sky-300 ring-2 ring-sky-100" : "border-slate-200 hover:border-sky-200"
+                    }`}
+                  >
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-bold text-blue-700">
+                        {categoryBadge(selectedCategory)}
+                      </span>
+                      <span className="text-xs font-medium text-slate-400">{selectedLine ?? "All"}</span>
+                    </div>
+
+                    <h2 className="min-h-[2.5rem] text-sm font-bold leading-snug text-slate-800">
+                      {titleFromFileName(entry.name)}
+                    </h2>
+
+                    <p className="mt-3 text-xs text-slate-500">
+                      {[formatBytes(entry.sizeBytes), entry.type?.toUpperCase()].filter(Boolean).join(" · ")}
+                    </p>
+
+                    <div className="mt-5 flex items-center gap-3">
+                      <span className="mr-auto rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-500">
+                        {entry.type?.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => openFile(entry)}
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => setAskEntry(entry)}
+                        className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700"
+                      >
+                        Ask AI
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {!loading && !error && visibleEntries.length > 0 && !selectedCategory && (
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="grid grid-cols-[minmax(0,1fr)_120px_120px_160px] gap-3 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
               <span>Name</span><span>Type</span><span>Size</span><span>Modified</span>
             </div>
             <div className="divide-y divide-slate-100">
-              {entries.map((entry) => {
+              {visibleEntries.map((entry) => {
                 const sourceId = `browse-${entry.path}`;
                 const isSelected = selectedSourceId === sourceId;
                 return (
@@ -352,7 +487,7 @@ export default function DocumentBrowser({
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs text-slate-400">{formatDate(entry.modifiedAt)}</span>
                       {entry.kind === "file" && (
-                        <button onClick={() => askFile(entry)} className="rounded-md bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700">Ask</button>
+                        <button onClick={() => setAskEntry(entry)} className="rounded-md bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700">Ask AI</button>
                       )}
                     </div>
                   </div>
@@ -362,6 +497,93 @@ export default function DocumentBrowser({
           </div>
         )}
       </div>
+
+      {askEntry && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) closeAsk(); }}
+        >
+          <div className="flex w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-start gap-4 border-b border-slate-100 px-6 py-5">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-600">
+                <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="mb-0.5 text-xs font-semibold uppercase tracking-wide text-sky-600">Ask AI about</p>
+                <h2 className="line-clamp-2 text-sm font-bold leading-snug text-slate-800">{titleFromFileName(askEntry.name)}</h2>
+                <p className="mt-1 truncate text-[10px] text-slate-400">{askEntry.path}</p>
+              </div>
+              <button
+                onClick={closeAsk}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-4 px-6 py-5">
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Quick prompts</p>
+                <div className="flex flex-wrap gap-2">
+                  {ASK_SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      onClick={() => {
+                        setAskPrompt(suggestion);
+                        askTextareaRef.current?.focus();
+                      }}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-all ${
+                        askPrompt === suggestion
+                          ? "border-sky-600 bg-sky-600 text-white"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+                      }`}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Your question</p>
+                <textarea
+                  ref={askTextareaRef}
+                  value={askPrompt}
+                  onChange={(e) => setAskPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitAsk();
+                  }}
+                  placeholder="e.g. What metrics and proof points are mentioned?"
+                  rows={4}
+                  className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700 outline-none transition-all placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-50"
+                />
+                <p className="mt-2 text-[11px] text-slate-400">Press Cmd/Ctrl + Enter to ask</p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button
+                onClick={closeAsk}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitAsk}
+                disabled={!askPrompt.trim()}
+                className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Ask AI
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

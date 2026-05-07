@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import type { Document } from "@/types";
+import type { Document, SearchableFileType } from "@/types";
 
 interface RichDoc extends Document {
   filePath?: string;
-  fileType?: "pdf" | "pptx";
+  fileType?: SearchableFileType;
   totalSlides?: number;
   slides?: { number: number; text: string }[];
 }
@@ -77,7 +77,7 @@ export default function DocResult({ doc, index, onView, onAskAI }: DocResultProp
         {/* Breadcrumb + file type */}
         <div className="flex items-center gap-2 mb-1">
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
-            fileType === "pdf" ? "bg-red-50 text-red-600" : "bg-orange-50 text-orange-600"
+            fileType === "pdf" ? "bg-red-50 text-red-600" : fileType === "docx" ? "bg-blue-50 text-blue-600" : "bg-orange-50 text-orange-600"
           }`}>
             {fileType}
           </span>
@@ -85,7 +85,7 @@ export default function DocResult({ doc, index, onView, onAskAI }: DocResultProp
             {breadcrumb}
             {totalSlides > 0 && (
               <span className="text-slate-400 ml-1">
-                · {totalSlides} {fileType === "pdf" ? "pages" : "slides"}
+                · {totalSlides} {fileType === "pdf" ? "pages" : fileType === "pptx" ? "slides" : "sections"}
               </span>
             )}
           </span>

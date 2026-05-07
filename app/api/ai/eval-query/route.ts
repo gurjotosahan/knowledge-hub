@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
   const sources = chunks.map((chunk, i) => ({
     id: `eval-src-${i}`,
     docId: chunk.fileName,
-    title: chunk.fileName.replace(/\.(pdf|pptx)$/i, "").replace(/[-_]/g, " "),
+    title: chunk.fileName.replace(/\.(pdf|pptx|docx)$/i, "").replace(/[-_]/g, " "),
     slide: chunk.page,
     serviceLine: "BFSI" as ServiceLine,
     filePath: chunk.filePath,
@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
       const uniquePages = [...new Set(fileChunks.map((c) => c.page))].sort((a, b) => a - b);
       return {
         id: chunk.fileName,
-        title: chunk.fileName.replace(/\.(pdf|pptx)$/i, "").replace(/[-_]/g, " "),
+        title: chunk.fileName.replace(/\.(pdf|pptx|docx)$/i, "").replace(/[-_]/g, " "),
         filePath: chunk.filePath,
         fileType: chunk.fileType,
         pages: uniquePages,

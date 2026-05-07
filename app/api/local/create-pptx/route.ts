@@ -137,7 +137,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const baseTitle = body.title?.trim() || basename(filePath).replace(/\.pptx$/i, "");
     const filename = `${escapeFileName(baseTitle)}-selected-slides.pptx`;
 
-    return new NextResponse(output, {
+    return new NextResponse(output as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "Content-Disposition": `attachment; filename="${filename}"`,

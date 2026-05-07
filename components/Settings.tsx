@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { AppConfig, AIProvider, SourceType } from "@/types";
+import { RESEARCH_SECTIONS, RESEARCH_SECTIONS_STORAGE_KEY } from "@/types/research";
+import type { ResearchSectionDef } from "@/types/research";
 import OneDrivePicker from "./OneDrivePicker";
 
 interface SettingsProps {
@@ -19,6 +21,27 @@ interface IndexStatus {
   embedModel?: string;
 }
 
+function loadResearchSections(): ResearchSectionDef[] {
+  if (typeof window === "undefined") return RESEARCH_SECTIONS;
+  try {
+    const raw = localStorage.getItem(RESEARCH_SECTIONS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as ResearchSectionDef[] : null;
+    if (!Array.isArray(parsed) || !parsed.length) return RESEARCH_SECTIONS;
+    const defaultsById = new Map(RESEARCH_SECTIONS.map((section) => [section.id, section]));
+    return parsed.map((section) => {
+      const defaults = defaultsById.get(section.id);
+      return {
+        ...defaults,
+        ...section,
+        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2025",
+        prompt: section.prompt || defaults?.prompt || "Describe the output this research component should produce.",
+      };
+    });
+  } catch {
+    return RESEARCH_SECTIONS;
+  }
+}
+
 export default function Settings({ config, onSave, onClose }: SettingsProps) {
   const [local, setLocal] = useState<AppConfig>(config);
   const [models, setModels]           = useState<ModelEntry[]>([]);
@@ -33,6 +56,8 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
   const [indexLog, setIndexLog]       = useState<string[]>([]);
   const [indexError, setIndexError]   = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const [researchSections, setResearchSections] = useState<ResearchSectionDef[]>(() => loadResearchSections());
+  const [activeResearchSectionId, setActiveResearchSectionId] = useState<string>(() => loadResearchSections()[0]?.id ?? "");
 
   const set = <K extends keyof AppConfig>(key: K, val: AppConfig[K]) =>
     setLocal((prev) => ({ ...prev, [key]: val }));
@@ -153,9 +178,54 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
   };
 
   const handleSave = () => {
+    localStorage.setItem(RESEARCH_SECTIONS_STORAGE_KEY, JSON.stringify(researchSections));
+    window.dispatchEvent(new Event("research-sections-updated"));
     onSave(local);
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
+  };
+
+  const updateResearchSection = (id: string, patch: Partial<ResearchSectionDef>) => {
+    setResearchSections((prev) => prev.map((section) => section.id === id ? { ...section, ...patch } : section));
+  };
+
+  const addResearchSection = () => {
+    const id = `custom-${Date.now()}`;
+    const section: ResearchSectionDef = {
+      id,
+      title: "New Research Component",
+      emoji: "📌",
+      description: "Describe what this component should research",
+      searchQueryTemplate: "{{client}} research topic 2025",
+      prompt: "Describe the output this research component should produce. Include the structure, facts to prioritize, and how to connect insights to Apexon opportunities.",
+    };
+    setResearchSections((prev) => [...prev, section]);
+    setActiveResearchSectionId(id);
+  };
+
+  const deleteResearchSection = (id: string) => {
+    setResearchSections((prev) => {
+      const next = prev.filter((section) => section.id !== id);
+      if (activeResearchSectionId === id) setActiveResearchSectionId(next[0]?.id ?? "");
+      return next;
+    });
+  };
+
+  const moveResearchSection = (id: string, direction: -1 | 1) => {
+    setResearchSections((prev) => {
+      const index = prev.findIndex((section) => section.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      next.splice(nextIndex, 0, item);
+      return next;
+    });
+  };
+
+  const resetResearchSections = () => {
+    setResearchSections(RESEARCH_SECTIONS);
+    setActiveResearchSectionId(RESEARCH_SECTIONS[0]?.id ?? "");
   };
 
   const sourceTab = (s: SourceType, label: string) => (
@@ -194,11 +264,14 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
       ? Boolean(local.graphDriveId || local.graphMockMode)
       : Boolean(local.folderPath));
 
+  const activeResearchSection =
+    researchSections.find((section) => section.id === activeResearchSectionId) ?? researchSections[0];
+
   return (
     <>
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" onClick={onClose} />
 
-      <div className="fixed inset-y-0 right-0 z-50 flex flex-col bg-white shadow-2xl" style={{ width: 480 }}>
+      <div className="fixed inset-y-0 right-0 z-50 flex w-[min(920px,calc(100vw-32px))] flex-col bg-white shadow-2xl">
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -515,6 +588,160 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
             <p className="text-xs text-slate-400 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
               Enable the <strong className="text-slate-500">+ Web</strong> toggle in chat to mix RAG results with live web search. Tavily is read server-side from <code className="text-slate-600">TAVILY_API_KEY</code>.
             </p>
+          </section>
+
+          {/* ── Section 5: Client Research Admin ── */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-slate-100 flex items-center justify-center">
+                  <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-700">Client Research Admin</h3>
+                  <p className="text-xs text-slate-400">Manage research components and module prompts</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={addResearchSection}
+                className="px-2.5 py-1.5 rounded-lg bg-sky-600 text-xs font-semibold text-white hover:bg-sky-700"
+              >
+                Add
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 overflow-hidden">
+              <div className="max-h-44 overflow-y-auto divide-y divide-slate-100 bg-white">
+                {researchSections.map((section, index) => {
+                  const active = section.id === activeResearchSection?.id;
+                  return (
+                    <div
+                      key={section.id}
+                      className={`flex items-center gap-2 px-3 py-2 transition-colors ${
+                        active ? "bg-sky-50" : "hover:bg-slate-50"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setActiveResearchSectionId(section.id)}
+                        className="min-w-0 flex flex-1 items-center gap-2 text-left"
+                      >
+                        <span className="text-base">{section.emoji}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className={`block truncate text-xs font-semibold ${active ? "text-sky-700" : "text-slate-700"}`}>{section.title}</span>
+                          <span className="block truncate text-[10px] text-slate-400">{section.description}</span>
+                        </span>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => moveResearchSection(section.id, -1)}
+                          disabled={index === 0}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                          title="Move up"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveResearchSection(section.id, 1)}
+                          disabled={index === researchSections.length - 1}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                          title="Move down"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {activeResearchSection ? (
+              <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="grid grid-cols-[56px_1fr] gap-2">
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Icon</label>
+                    <input
+                      type="text"
+                      value={activeResearchSection.emoji}
+                      onChange={(e) => updateResearchSection(activeResearchSection.id, { emoji: e.target.value })}
+                      className="w-full px-2 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Title</label>
+                    <input
+                      type="text"
+                      value={activeResearchSection.title}
+                      onChange={(e) => updateResearchSection(activeResearchSection.id, { title: e.target.value })}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={activeResearchSection.description}
+                    onChange={(e) => updateResearchSection(activeResearchSection.id, { description: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Search query template</label>
+                  <input
+                    type="text"
+                    value={activeResearchSection.searchQueryTemplate}
+                    onChange={(e) => updateResearchSection(activeResearchSection.id, { searchQueryTemplate: e.target.value })}
+                    placeholder="{{client}} cloud modernization AI 2025"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono"
+                  />
+                  <p className="mt-1 text-[10px] text-slate-400">Use <code className="text-slate-600">{"{{client}}"}</code> where the company name should be inserted.</p>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Module output prompt</label>
+                  <textarea
+                    rows={6}
+                    value={activeResearchSection.prompt}
+                    onChange={(e) => updateResearchSection(activeResearchSection.id, { prompt: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 leading-relaxed"
+                  />
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => deleteResearchSection(activeResearchSection.id)}
+                    disabled={researchSections.length <= 1}
+                    className="flex-1 py-2 rounded-lg border border-red-200 bg-white text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Delete Component
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetResearchSections}
+                    className="flex-1 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                  >
+                    Reset Defaults
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-slate-400">No research components configured.</p>
+            )}
           </section>
 
           {/* ── Status ── */}

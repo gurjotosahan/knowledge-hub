@@ -4,6 +4,7 @@ import * as os from "os";
 import * as fs from "fs/promises";
 import { createHash } from "crypto";
 import type { RagChunk } from "./indexer";
+import type { SearchableFileType } from "@/types";
 
 export interface IndexMeta {
   version: number;
@@ -26,7 +27,6 @@ function metaPath(sourceKey: string): string {
 }
 
 const tableCache = new Map<string, Promise<lancedb.Table>>();
-const childChunkCache = new Map<string, Promise<RagChunk[]>>();
 
 function chunksTable(sourceKey: string): Promise<lancedb.Table> {
   const dir = dbDir(sourceKey);
@@ -40,7 +40,6 @@ function chunksTable(sourceKey: string): Promise<lancedb.Table> {
 
 function clearRuntimeCaches(sourceKey: string): void {
   tableCache.delete(dbDir(sourceKey));
-  childChunkCache.delete(sourceKey);
 }
 
 // ── Serialisation ─────────────────────────────────────────────────────────────
@@ -67,7 +66,7 @@ function fromRecord(row: Record<string, unknown>): RagChunk {
     id:         row.id         as string,
     fileName:   row.fileName   as string,
     filePath:   row.filePath   as string,
-    fileType:   row.fileType   as "pdf" | "pptx",
+    fileType:   row.fileType   as SearchableFileType,
     page:       row.page       as number,
     chunkIndex: row.chunkIndex as number,
     text:       row.text       as string,
@@ -78,6 +77,10 @@ function fromRecord(row: Record<string, unknown>): RagChunk {
 
 // ── Write ─────────────────────────────────────────────────────────────────────
 
+async function buildFtsIndex(table: lancedb.Table): Promise<void> {
+  await table.createIndex("text", { config: lancedb.Index.fts(), replace: true });
+}
+
 export async function writeIndex(
   sourceKey: string,
   chunks: RagChunk[],
@@ -87,17 +90,61 @@ export async function writeIndex(
   const dir = dbDir(sourceKey);
   await fs.mkdir(path.dirname(dir), { recursive: true });
 
-  // Detect embedding dimension from first child chunk that has an embedding
   const firstEmbedded = chunks.find((c) => c.embedding?.length);
   const dim = firstEmbedded?.embedding?.length ?? 1;
 
   const records = chunks.map((c) => toRecord(c, dim));
 
   const db = await lancedb.connect(dir);
-  await db.createTable("chunks", records, { mode: "overwrite" });
+  const table = await db.createTable("chunks", records, { mode: "overwrite" });
+  await buildFtsIndex(table);
 
   await fs.writeFile(metaPath(sourceKey), JSON.stringify(meta), "utf-8");
   clearRuntimeCaches(sourceKey);
+}
+
+export async function appendIndex(
+  sourceKey: string,
+  chunks: RagChunk[],
+  metaPatch: Pick<IndexMeta, "version" | "sourceKey" | "indexedAt" | "embedModel" | "parentChunks" | "files">
+): Promise<IndexMeta> {
+  const existingMeta = await readMeta(sourceKey);
+  if (!existingMeta || existingMeta.version !== metaPatch.version || existingMeta.embedModel !== metaPatch.embedModel) {
+    await writeIndex(sourceKey, chunks, metaPatch);
+    return metaPatch;
+  }
+
+  clearRuntimeCaches(sourceKey);
+  const dir = dbDir(sourceKey);
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+
+  const firstEmbedded = chunks.find((c) => c.embedding?.length);
+  const dim = firstEmbedded?.embedding?.length ?? 1;
+  const records = chunks.map((c) => toRecord(c, dim));
+
+  const db = await lancedb.connect(dir);
+  let table: lancedb.Table;
+  try {
+    table = await db.openTable("chunks");
+  } catch {
+    await writeIndex(sourceKey, chunks, metaPatch);
+    return metaPatch;
+  }
+  if (records.length > 0) {
+    await table.add(records);
+    // Rebuild FTS index to include newly added documents
+    await buildFtsIndex(table);
+  }
+
+  const nextMeta: IndexMeta = {
+    ...existingMeta,
+    indexedAt: metaPatch.indexedAt,
+    parentChunks: existingMeta.parentChunks + metaPatch.parentChunks,
+    files: existingMeta.files + metaPatch.files,
+  };
+  await fs.writeFile(metaPath(sourceKey), JSON.stringify(nextMeta), "utf-8");
+  clearRuntimeCaches(sourceKey);
+  return nextMeta;
 }
 
 // ── Read meta ─────────────────────────────────────────────────────────────────
@@ -132,25 +179,25 @@ export async function vectorSearch(
     .map(fromRecord);
 }
 
-// Fetch all child chunks for BM25 / filename scoring (text + meta only, no vectors)
-export async function fetchChildChunks(sourceKey: string): Promise<RagChunk[]> {
-  const cached = childChunkCache.get(sourceKey);
-  if (cached) return cached;
-
-  const loaded = (async () => {
-    const tbl = await chunksTable(sourceKey);
+// FTS search — replaces the in-memory BM25 loop; scales to millions of chunks
+export async function ftsSearch(
+  sourceKey: string,
+  query: string,
+  limit: number
+): Promise<RagChunk[]> {
+  const tbl = await chunksTable(sourceKey);
+  try {
     const rows = await tbl
-      .query()
+      .search(query, "fts")
       .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
-      .toArray() as Record<string, unknown>[];
-
-    return rows
-      .filter((r) => (r.level as string) !== "parent")
-      .map(fromRecord);
-  })();
-
-  childChunkCache.set(sourceKey, loaded);
-  return loaded;
+      .where("level != 'parent'")
+      .limit(limit)
+      .toArray() as (Record<string, unknown> & { _score?: number })[];
+    return rows.map((r) => ({ ...fromRecord(r), score: r._score ?? 0 } as RagChunk & { score: number }));
+  } catch {
+    // FTS index may not exist yet (pre-existing index built before this change)
+    return [];
+  }
 }
 
 // Fetch parent chunks by IDs for context expansion

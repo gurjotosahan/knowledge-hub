@@ -1,10 +1,12 @@
 export type ServiceLine = "BFSI" | "Healthcare" | "Life Sciences";
 export type DocType = "RFP" | "POV" | "Case Study" | "Trend Report";
+export type DocumentCategory = "RFPs" | "POVs" | "Case Studies" | "Latest Trends";
 
 // ── App config (persisted in localStorage) ───────────────────────────────────
 
 export type AIProvider  = "ollama" | "openrouter" | "gemini";
 export type SourceType  = "local" | "sharepoint" | "onedrive";
+export type SearchableFileType = "pdf" | "pptx" | "docx";
 
 export interface AppConfig {
   // Data source
@@ -63,7 +65,7 @@ export interface LocalSlide {
 export interface LocalFile {
   name: string;
   path: string;
-  type: "pdf" | "pptx";
+  type: SearchableFileType;
   totalSlides: number;
   slides: LocalSlide[];
 }
@@ -72,7 +74,7 @@ export interface LocalSourceEntry {
   name: string;
   path: string;
   kind: "directory" | "file";
-  type?: "pdf" | "pptx";
+  type?: SearchableFileType;
   sizeBytes?: number;
   modifiedAt?: string;
   webUrl?: string;
@@ -137,11 +139,33 @@ export interface Source {
   slide: number;
   serviceLine: ServiceLine;
   filePath?: string;
-  fileType?: "pdf" | "pptx";
+  fileType?: SearchableFileType;
   excerpt?: string;
   // Web search fields
   sourceType?: "rag" | "web";
   url?: string;
+}
+
+export interface SlideSearchResult {
+  slideNumber: number;
+  reason: string;
+  excerpt: string;
+  score?: number;
+  confidence?: "High" | "Medium" | "Low";
+}
+
+export interface SlideSearchGroup {
+  filePath: string;
+  fileTitle: string;
+  fileType: "pptx";
+  slides: SlideSearchResult[];
+}
+
+export interface SlideSearchTopicGroup {
+  id: string;
+  topic: string;
+  groups: SlideSearchGroup[];
+  resultCount: number;
 }
 
 export interface AIAnswer {

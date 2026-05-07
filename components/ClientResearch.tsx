@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AppConfig } from "@/types";
-import { RESEARCH_SECTIONS } from "@/types/research";
-import type { SavedResearch, ResearchSectionResult } from "@/types/research";
+import { RESEARCH_SECTIONS, RESEARCH_SECTIONS_STORAGE_KEY } from "@/types/research";
+import type { ResearchSectionDef, SavedResearch, ResearchSectionResult } from "@/types/research";
 
 interface Props { config: AppConfig }
 
@@ -26,13 +26,49 @@ function renderMarkdown(text: string): React.ReactNode[] {
   });
 }
 
+function pdfSafeText(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, "\"")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/\u00A0/g, " ")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\u00A3\u00A9\u00AE\u00B0\u00B7\u2022]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
 interface ChatMessage { role: "user" | "assistant"; content: string }
+
+function loadResearchSections(): ResearchSectionDef[] {
+  if (typeof window === "undefined") return RESEARCH_SECTIONS;
+  try {
+    const raw = localStorage.getItem(RESEARCH_SECTIONS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as ResearchSectionDef[] : null;
+    if (!Array.isArray(parsed) || !parsed.length) return RESEARCH_SECTIONS;
+    const defaultsById = new Map(RESEARCH_SECTIONS.map((section) => [section.id, section]));
+    return parsed.map((section) => {
+      const defaults = defaultsById.get(section.id);
+      return {
+        ...defaults,
+        ...section,
+        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2025",
+        prompt: section.prompt || defaults?.prompt || "Describe the output this research component should produce.",
+      };
+    });
+  } catch {
+    return RESEARCH_SECTIONS;
+  }
+}
 
 export default function ClientResearch({ config }: Props) {
   const [view,          setView]          = useState<View>("home");
   const [clientName,    setClientName]    = useState("");
   const [followUpQuery, setFollowUpQuery] = useState("");
-  const [selected,      setSelected]      = useState<Set<string>>(new Set(RESEARCH_SECTIONS.map((s) => s.id)));
+  const [researchSections, setResearchSections] = useState<ResearchSectionDef[]>(() => loadResearchSections());
+  const [selected,      setSelected]      = useState<Set<string>>(() => new Set(loadResearchSections().map((s) => s.id)));
   const [sections,      setSections]      = useState<ResearchSectionResult[]>([]);
   const [progress,      setProgress]      = useState<string[]>([]);
   const [error,         setError]         = useState("");
@@ -61,6 +97,24 @@ export default function ClientResearch({ config }: Props) {
   }, [view]);
 
   useEffect(() => {
+    const refreshSections = () => setResearchSections(loadResearchSections());
+    window.addEventListener("research-sections-updated", refreshSections);
+    window.addEventListener("storage", refreshSections);
+    return () => {
+      window.removeEventListener("research-sections-updated", refreshSections);
+      window.removeEventListener("storage", refreshSections);
+    };
+  }, []);
+
+  useEffect(() => {
+    const validIds = new Set(researchSections.map((s) => s.id));
+    setSelected((prev) => {
+      const kept = [...prev].filter((id) => validIds.has(id));
+      return new Set(kept.length ? kept : researchSections.map((s) => s.id));
+    });
+  }, [researchSections]);
+
+  useEffect(() => {
     if (progressRef.current) progressRef.current.scrollTop = progressRef.current.scrollHeight;
   }, [progress]);
 
@@ -87,6 +141,7 @@ export default function ClientResearch({ config }: Props) {
         body: JSON.stringify({
           clientName:       clientName.trim(),
           selectedSections: Array.from(selected),
+          researchSections,
           followUpQuery:    followUpQuery.trim() || undefined,
           aiProvider:       config.aiProvider,
           ollamaBaseUrl:    config.ollamaBaseUrl,
@@ -138,7 +193,7 @@ export default function ClientResearch({ config }: Props) {
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(18);
       doc.setFont("helvetica", "bold");
-      doc.text(`Client Research: ${research.clientName}`, 20, 16);
+      doc.text(`Client Research: ${pdfSafeText(research.clientName)}`, 20, 16);
       doc.setFontSize(10);
       doc.setFont("helvetica", "normal");
       doc.text(`Generated ${new Date(research.createdAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}  ·  Apexon Knowledge Hub`, 20, 26);
@@ -155,12 +210,12 @@ export default function ClientResearch({ config }: Props) {
         doc.setFontSize(12);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(14, 165, 233);
-        doc.text(`${section.emoji}  ${section.title}`, 18, y + 3);
+        doc.text(pdfSafeText(section.title), 18, y + 3);
         doc.setTextColor(30, 41, 59);
         y += 12;
 
         // Section content — strip markdown, split lines
-        const plain = section.content
+        const plain = pdfSafeText(section.content)
           .replace(/\*\*(.+?)\*\*/g, "$1")
           .replace(/^#{1,3}\s/gm, "");
 
@@ -223,7 +278,7 @@ export default function ClientResearch({ config }: Props) {
     setError("");
     setResearchId(null);
     setChatHistory([]);
-    setSelected(new Set(RESEARCH_SECTIONS.map((s) => s.id)));
+    setSelected(new Set(researchSections.map((s) => s.id)));
   };
 
   const askFollowUp = async () => {
@@ -279,29 +334,29 @@ export default function ClientResearch({ config }: Props) {
           <p className="text-sm text-slate-500">Generate structured presales intelligence for any prospect. Reports are saved automatically as PDF.</p>
         </div>
 
-        {/* New research card */}
+        {/* New research button */}
         <button
           onClick={() => setView("picker")}
           disabled={!isConfigured}
-          className="flex items-center gap-4 w-full px-5 py-4 rounded-2xl border-2 border-dashed border-sky-200 bg-sky-50 hover:border-sky-400 hover:bg-sky-100 transition-all disabled:opacity-50 disabled:cursor-not-allowed mb-6"
+          className="flex items-center gap-3 w-full px-4 py-3 rounded-xl border border-slate-200 bg-white hover:border-sky-300 hover:shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed mb-6"
         >
-          <div className="w-10 h-10 rounded-xl bg-sky-500 flex items-center justify-center shrink-0">
-            <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="w-8 h-8 rounded-lg bg-sky-100 flex items-center justify-center shrink-0">
+            <svg className="w-4 h-4 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
           </div>
           <div className="text-left">
-            <p className="text-sm font-semibold text-sky-700">New Client Research</p>
-            <p className="text-xs text-sky-500 mt-0.5">
-              {isConfigured ? "Enter a company name and choose research sections" : "Configure an AI model in Settings first"}
+            <p className="text-sm font-semibold text-slate-700">New Research</p>
+            <p className="text-xs text-slate-400">
+              {isConfigured ? "Enter a company name to get started" : "Configure an AI model in Settings first"}
             </p>
           </div>
         </button>
 
-        {/* Saved research */}
+        {/* Historical research done */}
         {saved.length > 0 && (
           <div>
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Saved Research</h2>
+            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Historical Research Done</h2>
             <div className="space-y-2">
               {saved.map((r) => (
                 <div key={r.id} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white hover:border-sky-200 hover:shadow-sm transition-all group">
@@ -379,12 +434,12 @@ export default function ClientResearch({ config }: Props) {
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-semibold text-slate-500">Research Components</label>
             <div className="flex gap-3">
-              <button onClick={() => setSelected(new Set(RESEARCH_SECTIONS.map((s) => s.id)))} className="text-xs text-sky-600 hover:text-sky-700">Select all</button>
+              <button onClick={() => setSelected(new Set(researchSections.map((s) => s.id)))} className="text-xs text-sky-600 hover:text-sky-700">Select all</button>
               <button onClick={() => setSelected(new Set())} className="text-xs text-slate-400 hover:text-slate-600">Clear</button>
             </div>
           </div>
           <div className="grid grid-cols-1 gap-2">
-            {RESEARCH_SECTIONS.map((s) => {
+            {researchSections.map((s) => {
               const on = selected.has(s.id);
               return (
                 <button

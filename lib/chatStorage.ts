@@ -1,4 +1,4 @@
-import type { Source, Document, ServiceLine } from "@/types";
+import type { Source, Document, ServiceLine, SlideSearchGroup, SlideSearchTopicGroup, SearchableFileType } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ export interface StoredDoc {
   title: string;
   summary: string;
   filePath?: string;
-  fileType?: "pdf" | "pptx";
+  fileType?: SearchableFileType;
   totalSlides?: number;
   serviceLine: ServiceLine;
   type: string;
@@ -37,6 +37,8 @@ export interface StoredTurn {
   metrics?: string[];
   sources?: Source[];
   docs?: StoredDoc[];
+  slideGroups?: SlideSearchGroup[];
+  slideTopicGroups?: SlideSearchTopicGroup[];
   agentLog?: StoredAgentLogEntry[];
   tokenUsage?: StoredTokenUsage;
 }
@@ -101,7 +103,7 @@ export function stripDocsForStorage(docs?: Document[]): StoredDoc[] | undefined 
     type,
     tags,
     filePath:    (rest as { filePath?: string }).filePath,
-    fileType:    (rest as { fileType?: "pdf" | "pptx" }).fileType,
+    fileType:    (rest as { fileType?: SearchableFileType }).fileType,
     totalSlides: (rest as { totalSlides?: number }).totalSlides,
   }));
 }

@@ -1,43 +1,37 @@
 import type { RagChunk } from "./indexer";
-import { vectorSearch, fetchChildChunks, fetchParentsByIds } from "./store";
+import { vectorSearch, ftsSearch, fetchParentsByIds } from "./store";
 
 export interface RetrievedChunk extends RagChunk {
   score: number;
 }
 
-
-function bm25Score(queryTerms: string[], doc: string, avgLen: number): number {
-  const k1 = 1.5, b = 0.75;
-  const words = doc.toLowerCase().split(/\W+/);
-  const len = words.length;
-  const tf = new Map<string, number>();
-  for (const w of words) tf.set(w, (tf.get(w) ?? 0) + 1);
-
-  let score = 0;
-  for (const term of queryTerms) {
-    const f = tf.get(term) ?? 0;
-    if (f === 0) continue;
-    score += (f * (k1 + 1)) / (f + k1 * (1 - b + b * (len / avgLen)));
-  }
-  return score;
+// ── Term extraction ────────────────────────────────────────────────────────────
+function extractTerms(query: string): string[] {
+  return query
+    .split(/\W+/)
+    .filter((t) => {
+      if (t.length < 2) return false;
+      if (t === t.toUpperCase() && /[A-Z]/.test(t)) return true;
+      return t.length >= 4;
+    })
+    .map((t) => t.toLowerCase());
 }
 
-function filenameScore(queryTerms: string[], fileName: string, filePath?: string): number {
-  // Check both the filename and all path/ID segments so that "bfsi" matches
-  // filePaths like "graph:mock-drive-documents:mock-file-bfsi-rfp"
-  // and local paths like "/docs/BFSI/Digital-Banking-RFP.pdf"
+// ── Filename relevance ─────────────────────────────────────────────────────────
+function filenameScore(terms: string[], fileName: string, filePath?: string): number {
   const text = [
-    fileName.toLowerCase().replace(/\.(pdf|pptx)$/i, ""),
+    fileName.toLowerCase().replace(/\.(pdf|pptx|docx)$/i, ""),
     (filePath ?? "").toLowerCase(),
   ].join(" ");
   const parts = text.split(/\W+/).filter(Boolean);
   let hits = 0;
-  for (const term of queryTerms) {
-    if (parts.some((p) => p.includes(term) || term.includes(p))) hits++;
+  for (const t of terms) {
+    if (parts.some((p) => p.includes(t) || t.includes(p))) hits++;
   }
-  return hits / Math.max(queryTerms.length, 1);
+  return hits / Math.max(terms.length, 1);
 }
 
+// ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
 function reciprocalRankFusion(rankings: number[][], k = 60): number[] {
   const scores = new Map<number, number>();
   for (const list of rankings) {
@@ -48,6 +42,7 @@ function reciprocalRankFusion(rankings: number[][], k = 60): number[] {
   return [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([i]) => i);
 }
 
+// ── Main retriever ─────────────────────────────────────────────────────────────
 export async function retrieve(
   query: string,
   queryEmbedding: number[] | null,
@@ -56,71 +51,83 @@ export async function retrieve(
   expandedQuery?: string
 ): Promise<RetrievedChunk[]> {
 
-  // ── 1. Semantic: LanceDB ANN vector search ────────────────────────────────
-  const semChunks: RagChunk[] = queryEmbedding?.length
-    ? await vectorSearch(sourceKey, queryEmbedding, topK * 3).catch(() => [])
-    : [];
+  const terms = extractTerms(query);
+  const ftsQuery = expandedQuery
+    ? `${query} ${expandedQuery}`.trim()
+    : query;
 
-  // ── 2. BM25 + filename: fetch all child chunks (text only, no vectors) ────
-  const allChildren = await fetchChildChunks(sourceKey).catch(() => [] as RagChunk[]);
+  // 1. Semantic vector search + FTS — run in parallel
+  const [semChunks, ftsChunks] = await Promise.all([
+    queryEmbedding?.length
+      ? vectorSearch(sourceKey, queryEmbedding, topK * 3).catch(() => [] as RagChunk[])
+      : Promise.resolve([] as RagChunk[]),
+    ftsSearch(sourceKey, ftsQuery, topK * 3).catch(() => [] as RagChunk[]),
+  ]);
 
-  if (!allChildren.length && !semChunks.length) return [];
+  if (!semChunks.length && !ftsChunks.length) return [];
 
-  // Build a unified child pool: semChunks + allChildren, deduped by id
-  const childById = new Map<string, RagChunk>();
-  for (const c of [...allChildren, ...semChunks]) childById.set(c.id, c);
-  const children = [...childById.values()];
+  // 2. Deduplicate into a unified pool, preserving score metadata
+  const chunkById = new Map<string, RagChunk & { semScore: number; ftsScore: number }>();
 
-  const avgLen = children.reduce((s, c) => s + c.text.split(/\W+/).length, 0) / children.length;
+  for (const c of semChunks) {
+    chunkById.set(c.id, { ...c, semScore: 1.0, ftsScore: 0 });
+  }
+  for (const c of ftsChunks) {
+    const existing = chunkById.get(c.id);
+    const ftsScore = (c as RagChunk & { score?: number }).score ?? 0;
+    if (existing) {
+      existing.ftsScore = ftsScore;
+    } else {
+      chunkById.set(c.id, { ...c, semScore: 0, ftsScore });
+    }
+  }
 
-  const queryTerms = query.toLowerCase().split(/\W+/).filter((t) => t.length > 1);
-  const expandedTerms = expandedQuery
-    ? [...new Set([...queryTerms, ...expandedQuery.toLowerCase().split(/\W+/).filter((t) => t.length > 1)])]
-    : queryTerms;
+  const pool = [...chunkById.values()];
 
-  // ── Semantic ranking (index within children array) ────────────────────────
+  // 3. Three independent ranking signals for RRF
   const semIdSet = new Set(semChunks.map((c) => c.id));
-  const semRanking = children
-    .map((c, i) => ({ i, inSem: semIdSet.has(c.id) }))
-    .filter((x) => x.inSem)
+  const ftsIdSet = new Set(ftsChunks.map((c) => c.id));
+
+  const semRanking = pool
+    .map((c, i) => ({ i, hit: semIdSet.has(c.id) }))
+    .filter((x) => x.hit)
     .map((x) => x.i);
 
-  // ── BM25 keyword ranking ──────────────────────────────────────────────────
-  const kwRanking = children
-    .map((c, i) => ({ i, s: bm25Score(expandedTerms, c.text, avgLen) }))
+  const ftsRanking = pool
+    .map((c, i) => ({ i, hit: ftsIdSet.has(c.id) }))
+    .filter((x) => x.hit)
+    .map((x) => x.i);
+
+  const fnRanking = pool
+    .map((c, i) => ({ i, s: filenameScore(terms, c.fileName, c.filePath) }))
     .filter((x) => x.s > 0)
     .sort((a, b) => b.s - a.s)
     .map((x) => x.i);
 
-  // ── Filename ranking ──────────────────────────────────────────────────────
-  const fnRanking = children
-    .map((c, i) => ({ i, s: filenameScore(queryTerms, c.fileName, c.filePath) }))
-    .filter((x) => x.s > 0)
-    .sort((a, b) => b.s - a.s)
-    .map((x) => x.i);
-
-  // ── RRF merge ─────────────────────────────────────────────────────────────
+  // 4. Merge with RRF
   const signals = [
     ...(semRanking.length ? [semRanking.slice(0, 40)] : []),
-    ...(kwRanking.length  ? [kwRanking.slice(0, 40)]  : []),
-    ...(fnRanking.length  ? [fnRanking.slice(0, 40)]  : []),
+    ...(ftsRanking.length  ? [ftsRanking.slice(0, 40)]  : []),
+    ...(fnRanking.length   ? [fnRanking.slice(0, 40)]   : []),
   ];
 
-  let finalOrder: number[];
-  if (signals.length > 1)     finalOrder = reciprocalRankFusion(signals);
-  else if (signals.length === 1) finalOrder = signals[0];
-  else                           finalOrder = children.slice(0, topK).map((_, i) => i);
+  const finalOrder: number[] =
+    signals.length > 1 ? reciprocalRankFusion(signals)
+    : signals.length === 1 ? signals[0]
+    : pool.slice(0, topK).map((_, i) => i);
 
-  const kwScores = new Map(children.map((c, i) => [i, bm25Score(expandedTerms, c.text, avgLen)]));
-  const fnScores = new Map(children.map((c, i) => [i, filenameScore(queryTerms, c.fileName, c.filePath)]));
+  // 5. Score candidates: semantic primary, FTS secondary, filename tertiary
+  const maxFts = Math.max(...pool.map((c) => c.ftsScore), 1);
+  const candidates = finalOrder.slice(0, topK * 3).map((i) => {
+    const c = pool[i];
+    const score = c.semScore
+      + (c.ftsScore / maxFts) * 0.45
+      + filenameScore(terms, c.fileName, c.filePath) * 0.50;
+    return { chunk: c, score };
+  }).sort((a, b) => b.score - a.score);
 
-  const candidates = finalOrder.slice(0, topK * 4).map((i) => ({
-    chunk: children[i],
-    score: (semIdSet.has(children[i].id) ? 1 : 0) + (kwScores.get(i) ?? 0) * 0.1 + (fnScores.get(i) ?? 0) * 0.5,
-  }));
-
-  // ── Expand children → parent chunks via LanceDB lookup ───────────────────
-  const isHierarchical = children.some((c) => c.level === "child");
+  // 6. Hierarchical expansion: child → parent
+  const isHierarchical = pool.some((c) => c.level === "child");
 
   if (isHierarchical) {
     const seenParents = new Set<string>();
@@ -148,6 +155,5 @@ export async function retrieve(
     return results;
   }
 
-  // ── Legacy: return children directly ─────────────────────────────────────
   return candidates.slice(0, topK).map(({ chunk, score }) => ({ ...chunk, score }));
 }

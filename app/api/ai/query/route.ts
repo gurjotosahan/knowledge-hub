@@ -4,6 +4,8 @@ import { retrieve } from "@/lib/rag/retriever";
 import { fetchFileParents } from "@/lib/rag/store";
 import {
   runAgent,
+  rerankChunks,
+  compressContextChunks,
   getEmbedding,
   searchWeb,
   type AgentConfig,
@@ -431,8 +433,12 @@ export async function POST(req: NextRequest) {
   }));
 
   if (agentResult.usedAgent) {
-    // Agent successfully called tools — use its results
-    contextChunks = (await filterChunksByNamedEntitiesWithDeckContext(agentResult.chunks, entityTerms, sourceKey)).slice(0, 8);
+    // Agent successfully called tools — use its results.
+    // Sort by retrieval score before reranking so the cut-off is score-ordered,
+    // not arrival-ordered (chunks from later tool calls were appended last).
+    const rawAgentChunks = await filterChunksByNamedEntitiesWithDeckContext(agentResult.chunks, entityTerms, sourceKey);
+    rawAgentChunks.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    contextChunks = await rerankChunks(query, rawAgentChunks, agentConfig, 8);
     webResults    = filterByNamedEntities(agentResult.webResults, entityTerms);
     agentLog      = agentResult.log;
     console.log(`[Agent] ${agentLog.length} tool calls across ${new Set(agentLog.map(l => l.iteration)).size} iterations, ${contextChunks.length} chunks, ${webResults.length} web results`);
@@ -466,7 +472,8 @@ export async function POST(req: NextRequest) {
       .filter((r): r is PromiseFulfilledResult<RetrievedChunk[]> => r.status === "fulfilled")
       .map((r) => r.value);
 
-    contextChunks = (await filterChunksByNamedEntitiesWithDeckContext(crossQueryRRF(allRetrievals, 12), entityTerms, sourceKey)).slice(0, 5);
+    const rawFallbackChunks = await filterChunksByNamedEntitiesWithDeckContext(crossQueryRRF(allRetrievals, 12), entityTerms, sourceKey);
+    contextChunks = await rerankChunks(query, rawFallbackChunks, agentConfig, 8);
     webResults    = filterByNamedEntities(fallbackWebResults, entityTerms);
   }
 
@@ -489,11 +496,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ answer: hint, sources: [], documents: [] });
   }
 
-  // ── 3. Build context string ─────────────────────────────────────────────────
-  const label = (t: "pdf" | "pptx", n: number) => `${t === "pdf" ? "Page" : "Slide"} ${n}`;
+  // ── 3. Compress chunks, then build context string ───────────────────────────
+  const label = (t: "pdf" | "pptx" | "docx", n: number) =>
+    `${t === "pdf" ? "Page" : t === "pptx" ? "Slide" : "Section"} ${n}`;
 
-  const docContext = contextChunks.length > 0
-    ? contextChunks
+  // Compress: query-aware sentence extraction + same-page dedup.
+  // contextChunks keeps original metadata for citations; compressed chunks feed the LLM.
+  const compressedChunks = compressContextChunks(query, contextChunks);
+
+  const docContext = compressedChunks.length > 0
+    ? compressedChunks
         .map((c) => `[INTERNAL DOC: ${c.fileName} | ${label(c.fileType, c.page)}]\n${c.text}`)
         .join("\n\n---\n\n")
     : "";
@@ -521,6 +533,41 @@ export async function POST(req: NextRequest) {
   // ── 4. Synthesize — single structured LLM call ──────────────────────────────
   let rawContent: string;
   let synthesisTokens = 0;
+
+  function isTimeoutError(err: unknown): boolean {
+    const text = String(err);
+    return text.includes("TimeoutError") || text.includes("aborted due to timeout") || text.includes("The operation was aborted");
+  }
+
+  function fallbackSynthesis(): AIResponse {
+    const docCitations = contextChunks.slice(0, 3).map((chunk) => ({
+      sourceType: "rag" as const,
+      file: chunk.fileName,
+      slide: chunk.page,
+      excerpt: chunk.text.slice(0, 260),
+    }));
+    const webCitations = webResults.slice(0, 2).map((result) => ({
+      sourceType: "web" as const,
+      url: result.url,
+      title: result.title,
+      excerpt: result.content.slice(0, 260),
+    }));
+    const citations = [...docCitations, ...webCitations];
+    const keyPoints = [
+      ...contextChunks.slice(0, 3).map((chunk) => `${chunk.fileName} ${label(chunk.fileType, chunk.page)}: ${chunk.text.replace(/\s+/g, " ").slice(0, 220)}`),
+      ...webResults.slice(0, 2).map((result) => `${result.title}: ${result.content.replace(/\s+/g, " ").slice(0, 220)}`),
+    ];
+
+    return {
+      answer: citations.length
+        ? "The full AI synthesis timed out, but these are the strongest retrieved internal and web signals for the request. Use the source links below to inspect the evidence directly."
+        : "The full AI synthesis timed out and no relevant source evidence was available.",
+      keyPoints,
+      metrics: [],
+      citations,
+    };
+  }
+
   try {
     if (aiProvider === "ollama") {
       const res = await fetch(`${ollamaBase}/api/chat`, {
@@ -581,7 +628,11 @@ export async function POST(req: NextRequest) {
       synthesisTokens = data.usage?.total_tokens ?? 0;
     }
   } catch (err) {
-    return NextResponse.json({ error: `AI request failed: ${err}` }, { status: 502 });
+    if (isTimeoutError(err)) {
+      rawContent = JSON.stringify(fallbackSynthesis());
+    } else {
+      return NextResponse.json({ error: `AI request failed: ${err}` }, { status: 502 });
+    }
   }
 
   // ── 5. Parse AI response ────────────────────────────────────────────────────
@@ -666,7 +717,7 @@ export async function POST(req: NextRequest) {
       return {
         id: `local-src-${i}`,
         docId: chunk.fileName,
-        title: chunk.fileName.replace(/\.(pdf|pptx)$/i, "").replace(/[-_]/g, " "),
+        title: chunk.fileName.replace(/\.(pdf|pptx|docx)$/i, "").replace(/[-_]/g, " "),
         slide: Math.max(1, c.slide ?? chunk.page),
         serviceLine: "BFSI" as ServiceLine,
         filePath: chunk.filePath,
@@ -690,8 +741,8 @@ export async function POST(req: NextRequest) {
       const maxPage = uniquePages[uniquePages.length - 1] ?? 1;
       return {
         id: chunk.fileName,
-        title: chunk.fileName.replace(/\.(pdf|pptx)$/i, "").replace(/[-_]/g, " "),
-        summary: `${uniquePages.length} ${chunk.fileType === "pdf" ? "pages" : "slides"} · ${chunk.fileType.toUpperCase()}`,
+        title: chunk.fileName.replace(/\.(pdf|pptx|docx)$/i, "").replace(/[-_]/g, " "),
+        summary: `${uniquePages.length} ${chunk.fileType === "pdf" ? "pages" : chunk.fileType === "pptx" ? "slides" : "sections"} · ${chunk.fileType.toUpperCase()}`,
         filePath: chunk.filePath,
         fileType: chunk.fileType,
         totalSlides: maxPage,

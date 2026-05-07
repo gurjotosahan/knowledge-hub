@@ -15,6 +15,29 @@ async function getPdfjsLib() {
   return pdfjsLib;
 }
 
+// ── Shared PDF document cache ──────────────────────────────────────────────────
+// All PdfPageCanvas instances for the same URL share ONE loaded document.
+// Without this, a 48-slide deck loads the full PDF 48 times simultaneously,
+// exhausting the pdfjs worker queue and browser memory.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const pdfDocCache = new Map<string, Promise<any>>();
+
+export function clearPdfCache(url: string) {
+  pdfDocCache.delete(url);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getSharedPdf(url: string): Promise<any> {
+  if (!pdfDocCache.has(url)) {
+    const lib = await getPdfjsLib();
+    const task = lib.getDocument(url);
+    const p = (task as unknown as { promise: Promise<unknown> }).promise;
+    pdfDocCache.set(url, p);
+    p.catch(() => pdfDocCache.delete(url));
+  }
+  return pdfDocCache.get(url)!;
+}
+
 interface Props {
   /** URL served by /api/local/serve */
   fileUrl: string;
@@ -32,16 +55,13 @@ export default function PdfPageCanvas({ fileUrl, pageNumber, displayWidth }: Pro
   useEffect(() => {
     let cancelled = false;
     let renderTask: { promise: Promise<unknown>; cancel: () => void } | null = null;
-    let loadingTask: { promise: Promise<unknown>; destroy: () => Promise<void> } | null = null;
 
     async function render() {
       if (!canvasRef.current) return;
       setError("");
       setLoading(true);
       try {
-        const pdfjsLib = await getPdfjsLib();
-        loadingTask = pdfjsLib.getDocument(fileUrl);
-        const pdf = await loadingTask.promise as {
+        const pdf = await getSharedPdf(fileUrl) as {
           getPage: (page: number) => Promise<{
             getViewport: (options: { scale: number }) => { width: number; height: number };
             render: (options: {
@@ -90,7 +110,6 @@ export default function PdfPageCanvas({ fileUrl, pageNumber, displayWidth }: Pro
     return () => {
       cancelled = true;
       renderTask?.cancel();
-      void loadingTask?.destroy();
     };
   }, [fileUrl, pageNumber, displayWidth]);
 

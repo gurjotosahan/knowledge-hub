@@ -1,13 +1,14 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { extractDoc, type ExtractedDoc } from "@/lib/extractors";
-import { writeIndex, readMeta, type IndexMeta } from "./store";
+import { appendIndex, writeIndex, readMeta, type IndexMeta } from "./store";
+import type { SearchableFileType } from "@/types";
 
 export interface RagChunk {
   id: string;
   fileName: string;
   filePath: string;
-  fileType: "pdf" | "pptx";
+  fileType: SearchableFileType;
   page: number;
   chunkIndex: number;
   text: string;
@@ -67,7 +68,7 @@ function chunkHierarchical(
   text: string,
   fileName: string,
   filePath: string,
-  fileType: "pdf" | "pptx",
+  fileType: SearchableFileType,
   page: number
 ): Array<{ parent: Omit<RagChunk, "embedding">; children: Omit<RagChunk, "embedding">[] }> {
   const parentTexts = splitText(text, PARENT_CHARS, PARENT_OVERLAP);
@@ -208,6 +209,83 @@ export async function indexExtractedDocs(
   return { chunks: parentCount, files: docs.length };
 }
 
+export async function appendExtractedDocs(
+  sourceKey: string,
+  docs: ExtractedDoc[],
+  ollamaBaseUrl: string,
+  embedModel: string,
+  onProgress: (msg: string) => void,
+  embeddingProvider: "ollama" | "google" = "ollama",
+  googleApiKey = ""
+): Promise<{ chunks: number; files: number; totalChunks: number; totalFiles: number }> {
+  const chunks: RagChunk[] = [];
+  const childrenToEmbed: RagChunk[] = [];
+
+  for (let fi = 0; fi < docs.length; fi++) {
+    const doc = docs[fi];
+    onProgress(`[${fi + 1}/${docs.length}] Chunking ${doc.fileName}...`);
+
+    for (const slide of doc.slides) {
+      if (!slide.text?.trim()) continue;
+      for (const { parent, children } of chunkHierarchical(
+        slide.text, doc.fileName, doc.filePath, doc.fileType, slide.number
+      )) {
+        chunks.push(parent as RagChunk);
+        for (const child of children) {
+          const c: RagChunk = { ...child };
+          childrenToEmbed.push(c);
+          chunks.push(c);
+        }
+      }
+    }
+  }
+
+  let embedded = 0;
+  onProgress(`Embedding ${childrenToEmbed.length} new child chunks...`);
+  await mapConcurrent(childrenToEmbed, EMBED_CONCURRENCY, async (chunk) => {
+    try {
+      chunk.embedding = await embedText(chunk.text, ollamaBaseUrl, embedModel, embeddingProvider, googleApiKey);
+    } catch {
+      // Keyword retrieval still works when an individual embedding fails.
+    }
+    embedded++;
+    if (embedded % 25 === 0 || embedded === childrenToEmbed.length) {
+      onProgress(`Embedded ${embedded}/${childrenToEmbed.length} new chunks`);
+    }
+  });
+
+  const parentCount = chunks.filter((c) => c.level === "parent").length;
+  const fileNames = new Set(chunks.map((c) => c.fileName));
+  if (chunks.length === 0) {
+    const existingMeta = await readMeta(sourceKey);
+    onProgress("No searchable text found in the new file(s).");
+    return {
+      chunks: 0,
+      files: docs.length,
+      totalChunks: existingMeta?.parentChunks ?? 0,
+      totalFiles: existingMeta?.files ?? 0,
+    };
+  }
+
+  const meta: IndexMeta = {
+    version: INDEX_VERSION,
+    sourceKey,
+    indexedAt: new Date().toISOString(),
+    embedModel,
+    parentChunks: parentCount,
+    files: fileNames.size,
+  };
+
+  const nextMeta = await appendIndex(sourceKey, chunks, meta);
+  onProgress(`Done — appended ${parentCount} parent chunks from ${docs.length} new file(s).`);
+  return {
+    chunks: parentCount,
+    files: docs.length,
+    totalChunks: nextMeta.parentChunks,
+    totalFiles: nextMeta.files,
+  };
+}
+
 // ── Local folder entry point ──────────────────────────────────────────────────
 
 async function walkFolder(folderPath: string): Promise<string[]> {
@@ -218,7 +296,7 @@ async function walkFolder(folderPath: string): Promise<string[]> {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory() && !entry.name.startsWith(".")) {
         await walk(full);
-      } else if (entry.isFile() && /\.(pdf|pptx)$/i.test(entry.name)) {
+      } else if (entry.isFile() && /\.(pdf|pptx|docx)$/i.test(entry.name)) {
         files.push(full);
       }
     }

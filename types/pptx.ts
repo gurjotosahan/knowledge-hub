@@ -31,6 +31,7 @@ export interface ImageShape {
 export interface PptxSlideData {
   slideEmuWidth: number;
   slideEmuHeight: number;
+  totalSlides: number;
   background?: string;          // solid hex colour
   backgroundMediaPath?: string; // zip-internal path for background image
   shapes: (TextShape | ImageShape)[];

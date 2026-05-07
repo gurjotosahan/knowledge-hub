@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { ServiceLine, Source, AppConfig, Document } from "@/types";
+import type { ServiceLine, Source, AppConfig, Document, DocumentCategory, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
 import { aiAnswer } from "@/data/mockData";
 import Sidebar from "@/components/Sidebar";
@@ -12,6 +12,7 @@ import LocalDocPreview, { type SlideDeck, type SlideDeckItem } from "@/component
 import Settings from "@/components/Settings";
 import DocumentBrowser from "@/components/DocumentBrowser";
 import ClientResearch from "@/components/ClientResearch";
+import SlideSearchResults from "@/components/SlideSearchResults";
 import {
   loadSessions,
   saveSession,
@@ -40,11 +41,14 @@ interface TokenUsage {
 interface Turn {
   id: string;
   query: string;
+  mode?: "answer" | "slides";
   answer?: string;
   keyPoints?: string[];
   metrics?: string[];
   sources?: Source[];
   docs?: Document[];
+  slideGroups?: SlideSearchGroup[];
+  slideTopicGroups?: SlideSearchTopicGroup[];
   isLoading: boolean;
   agentLog?: AgentLogEntry[];
   tokenUsage?: TokenUsage;
@@ -120,20 +124,26 @@ const SUGGESTIONS = [
   "What proof points do we have for data analytics projects?",
 ];
 
-function newDeckName(count: number): string {
-  return `Deck ${count + 1}`;
-}
-
 export default function Page() {
   // ── Config ────────────────────────────────────────────────────────────────
   const [config, setConfig]           = useState<AppConfig>(DEFAULT_CONFIG);
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(CONFIG_KEY);
-      if (saved) setConfig(JSON.parse(saved));
-    } catch { /* ignore */ }
+    const saved = localStorage.getItem(CONFIG_KEY);
+    if (saved) {
+      try { setConfig(JSON.parse(saved)); } catch { /* ignore */ }
+      return;
+    }
+    // No local config — pull server defaults so shared/tunnel users get the right setup
+    fetch("/api/config/defaults")
+      .then((r) => r.json())
+      .then((defaults) => {
+        if (defaults.folderPath || defaults.aiProvider) {
+          setConfig((prev) => ({ ...prev, ...defaults }));
+        }
+      })
+      .catch(() => { /* silently ignore — app still works in mock mode */ });
   }, []);
 
   const saveConfig = (next: AppConfig) => {
@@ -151,15 +161,10 @@ export default function Page() {
 
   // ── Session persistence ───────────────────────────────────────────────────
 
-  // Load sessions on mount and restore most recent
+  // Load sessions for the sidebar, but always start a fresh chat on page refresh.
   useEffect(() => {
     const stored = loadSessions();
     setSessions(stored);
-    if (stored.length > 0) {
-      const latest = stored[0];
-      setActiveSessionId(latest.id);
-      setTurns(latest.turns.map((t) => ({ ...t, isLoading: false, docs: t.docs as unknown as Document[] })));
-    }
   }, []);
 
   // Persist current session whenever completed turns change
@@ -177,6 +182,8 @@ export default function Page() {
         metrics:    t.metrics,
         sources:    t.sources,
         docs:       stripDocsForStorage(t.docs),
+        slideGroups: t.slideGroups,
+        slideTopicGroups: t.slideTopicGroups,
         agentLog:   t.agentLog,
         tokenUsage: t.tokenUsage,
       })),
@@ -190,16 +197,22 @@ export default function Page() {
   // ── State ─────────────────────────────────────────────────────────────────
   const [appMode,          setAppMode]          = useState<"knowledge" | "research">("knowledge");
   const [selectedLine,     setSelectedLine]     = useState<ServiceLine | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<DocumentCategory | null>(null);
   const [selectedSource,   setSelectedSource]   = useState<Source | null>(null);
   const [view,             setView]             = useState<"chat" | "source">("chat");
   const [turns,            setTurns]            = useState<Turn[]>([]);
   const [searchMode,       setSearchMode]       = useState<"rag" | "mixed">("rag");
+  const [queryMode,        setQueryMode]        = useState<"answer" | "slides">("answer");
   const [sessions,         setSessions]         = useState<ChatSession[]>([]);
   const [activeSessionId,  setActiveSessionId]  = useState<string | null>(null);
   const [slideDecks,       setSlideDecks]       = useState<SlideDeck[]>([]);
   const [activeDeckId,     setActiveDeckId]     = useState<string>("");
   const [deckExporting,    setDeckExporting]    = useState(false);
   const [deckError,        setDeckError]        = useState("");
+  const [uploadingContent, setUploadingContent] = useState(false);
+  const [uploadStatus,     setUploadStatus]     = useState("");
+  const [uploadFileNames,  setUploadFileNames]  = useState<string[]>([]);
+  const [expandedRelatedDocs, setExpandedRelatedDocs] = useState<Set<string>>(new Set());
 
   // Keep a stable ref to activeSessionId so callbacks don't need it in deps
   const activeSessionIdRef = useRef<string | null>(null);
@@ -209,11 +222,11 @@ export default function Page() {
 
   const currentTurn  = turns[turns.length - 1] ?? null;
   const isAnyLoading = currentTurn?.isLoading ?? false;
-  const bottomRef    = useRef<HTMLDivElement>(null);
+  const latestTurnRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns.length, isAnyLoading]);
+    latestTurnRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [turns.length]);
 
   useEffect(() => {
     try {
@@ -259,17 +272,6 @@ export default function Page() {
 
   const activeDeck = slideDecks.find((deck) => deck.id === activeDeckId) ?? slideDecks[0];
 
-  const createSlideDeck = () => {
-    const deck: SlideDeck = {
-      id: `deck-${Date.now()}`,
-      name: newDeckName(slideDecks.length),
-      items: [],
-    };
-    setSlideDecks((prev) => [...prev, deck]);
-    setActiveDeckId(deck.id);
-    setDeckError("");
-  };
-
   const toggleDeckSlide = (item: Omit<SlideDeckItem, "id">, deckId = activeDeckId) => {
     setDeckError("");
     const targetDeck = slideDecks.find((deck) => deck.id === deckId);
@@ -280,10 +282,6 @@ export default function Page() {
       targetDeck?.items.length &&
       !targetDeck.items.some((existing) => existing.filePath === item.filePath)
     );
-    if (!alreadyInDeck && deckHasAnotherSource) {
-      setDeckError("This deck already uses another source PPTX. Create a new deck for this file.");
-      return;
-    }
 
     let targetDeckId = deckId;
     if (!targetDeckId) {
@@ -299,6 +297,9 @@ export default function Page() {
         const exists = deck.items.some(
           (existing) => existing.filePath === item.filePath && existing.slideNumber === item.slideNumber
         );
+        if (!exists && deckHasAnotherSource) {
+          return { ...deck, items: [{ ...item, id: `${item.filePath}::${item.slideNumber}` }] };
+        }
         return {
           ...deck,
           items: exists
@@ -324,7 +325,7 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: activeDeck.name,
+          title: activeDeck.items[0]?.fileTitle || activeDeck.name,
           items: activeDeck.items.map((item) => ({
             filePath: item.filePath,
             fileTitle: item.fileTitle,
@@ -369,12 +370,15 @@ export default function Page() {
 
     const turnId = `turn-${Date.now()}`;
     const completedTurns = turns.filter((t) => !t.isLoading && t.answer);
-    const conversationHistory = completedTurns.flatMap((t) => [
-      { role: "user",      content: t.query },
-      { role: "assistant", content: t.answer ?? "" },
-    ]);
+    const conversationHistory = completedTurns
+      .filter((t) => t.mode !== "slides")
+      .flatMap((t) => [
+        { role: "user",      content: t.query },
+        { role: "assistant", content: t.answer ?? "" },
+      ]);
 
-    setTurns((prev) => [...prev, { id: turnId, query: q, isLoading: true }]);
+    const mode = queryMode;
+    setTurns((prev) => [...prev, { id: turnId, query: q, mode, isLoading: true }]);
 
     if (!isLocalMode) {
       setTurns((prev) =>
@@ -386,13 +390,14 @@ export default function Page() {
     try {
       searchAbortRef.current = new AbortController();
       const timer = setTimeout(() => searchAbortRef.current?.abort(), 270_000);
-      const res = await fetch("/api/ai/query", {
+      const endpoint = mode === "slides" ? "/api/ai/slide-search" : "/api/ai/query";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: searchAbortRef.current.signal,
         body: JSON.stringify({
           query: q,
-          conversationHistory,
+          conversationHistory: mode === "answer" ? conversationHistory : [],
           sourceKey,
           searchMode,
           aiProvider:        config.aiProvider,
@@ -409,20 +414,42 @@ export default function Page() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
+      const slideGroups = (data.groups ?? []) as SlideSearchGroup[];
+      const slideTopicGroups = (data.topicGroups ?? []) as SlideSearchTopicGroup[];
+      const slideCount = slideTopicGroups.length > 0
+        ? slideTopicGroups.reduce((sum, topic) => sum + topic.resultCount, 0)
+        : slideGroups.reduce((sum, group) => sum + group.slides.length, 0);
+
       setTurns((prev) => {
         const next = prev.map((t) =>
           t.id === turnId
-            ? {
-                ...t,
-                isLoading:  false,
-                answer:     data.answer,
-                keyPoints:  data.keyPoints  ?? [],
-                metrics:    data.metrics    ?? [],
-                sources:    data.sources    ?? [],
-                docs:       data.documents  ?? [],
-                agentLog:   data.agentLog,
-                tokenUsage: data.tokenUsage,
-              }
+            ? mode === "slides"
+              ? {
+                  ...t,
+                  isLoading:   false,
+                  answer:      slideCount > 0
+                    ? slideTopicGroups.length > 1
+                      ? `Found ${slideCount} relevant slide${slideCount !== 1 ? "s" : ""} across ${slideTopicGroups.length} topics. Results are grouped by topic with independent ranking.`
+                      : `Found the top ${slideCount} detailed topic slide${slideCount !== 1 ? "s" : ""} across ${slideGroups.length} source deck${slideGroups.length !== 1 ? "s" : ""}. Select slides inside each deck and export them separately.`
+                    : "No matching PPTX slides were found.",
+                  keyPoints:   [],
+                  metrics:     [],
+                  sources:     [],
+                  docs:        [],
+                  slideGroups,
+                  slideTopicGroups,
+                }
+              : {
+                  ...t,
+                  isLoading:  false,
+                  answer:     data.answer,
+                  keyPoints:  data.keyPoints  ?? [],
+                  metrics:    data.metrics    ?? [],
+                  sources:    data.sources    ?? [],
+                  docs:       data.documents  ?? [],
+                  agentLog:   data.agentLog,
+                  tokenUsage: data.tokenUsage,
+                }
             : t
         );
         // Persist after state update
@@ -448,7 +475,66 @@ export default function Page() {
     searchAbortRef.current?.abort();
   };
 
-  const goHome = () => { setTurns([]); setView("chat"); setActiveSessionId(null); setAppMode("knowledge"); };
+  const toggleRelatedDocs = (turnId: string) => {
+    setExpandedRelatedDocs((prev) => {
+      const next = new Set(prev);
+      next.has(turnId) ? next.delete(turnId) : next.add(turnId);
+      return next;
+    });
+  };
+
+  const handleContentUpload = async (files: FileList) => {
+    setUploadFileNames(Array.from(files).map((file) => file.name));
+    setUploadingContent(true);
+    setUploadStatus(`Indexing ${files.length} file${files.length !== 1 ? "s" : ""}...`);
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append("files", file));
+      form.append("ollamaBaseUrl", config.ollamaBaseUrl);
+      form.append("embedModel", config.ollamaEmbedModel);
+      form.append("embeddingProvider", config.embeddingProvider);
+      if (config.sourceType === "local" && config.folderPath) {
+        form.append("targetFolder", config.folderPath);
+      }
+
+      const res = await fetch("/api/local/upload-content", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error ?? `Upload failed (${res.status})`);
+
+      const nextConfig = {
+        ...config,
+        sourceType: "local" as const,
+        folderPath: data.folderPath as string,
+      };
+      setConfig(nextConfig);
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(nextConfig));
+      setUploadStatus(
+        `Indexed ${data.indexedFiles ?? files.length} uploaded file${(data.indexedFiles ?? files.length) !== 1 ? "s" : ""}.`
+      );
+      setTimeout(() => setUploadStatus(""), 5000);
+    } catch (err) {
+      setUploadStatus(`Upload failed: ${String(err).replace(/^Error:\s*/, "")}`);
+    } finally {
+      setUploadingContent(false);
+    }
+  };
+
+  const previewFoundSlide = (group: SlideSearchGroup, slide: SlideSearchResult) => {
+    setSelectedSource({
+      id: `slide-finder-${group.filePath}-${slide.slideNumber}`,
+      docId: group.filePath,
+      title: group.fileTitle,
+      slide: slide.slideNumber,
+      serviceLine: selectedLine ?? "BFSI",
+      filePath: group.filePath,
+      fileType: "pptx",
+      excerpt: slide.excerpt,
+    });
+  };
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const goHome = () => { setTurns([]); setView("chat"); setActiveSessionId(null); setAppMode("knowledge"); setSidebarOpen(false); };
 
   const handleNewChat = () => {
     setTurns([]);
@@ -458,12 +544,25 @@ export default function Page() {
     setAppMode("knowledge");
   };
 
+  const handleSelectService = (line: ServiceLine | null) => {
+    setSelectedLine(line);
+    setSelectedCategory(null);
+  };
+
+  const handleSelectCategory = (line: ServiceLine, category: DocumentCategory) => {
+    setSelectedLine(line);
+    setSelectedCategory(category);
+    setView("source");
+    setAppMode("knowledge");
+  };
+
   const handleSelectSession = (id: string) => {
     const session = sessions.find((s) => s.id === id);
     if (!session) return;
     setActiveSessionId(id);
     setTurns(session.turns.map((t) => ({ ...t, isLoading: false, docs: t.docs as unknown as Document[] })));
     setView("chat");
+    setAppMode("knowledge");
     setSelectedSource(null);
   };
 
@@ -484,17 +583,21 @@ export default function Page() {
       {/* Sidebar */}
       <Sidebar
         selectedLine={selectedLine}
-        onSelect={setSelectedLine}
+        onSelect={handleSelectService}
+        selectedCategory={selectedCategory}
+        onSelectCategory={(line, cat) => { handleSelectCategory(line, cat); setSidebarOpen(false); }}
         config={config}
-        onOpenSettings={() => setShowSettings(true)}
+        onOpenSettings={() => { setShowSettings(true); setSidebarOpen(false); }}
         onGoHome={goHome}
-        onNewChat={handleNewChat}
+        onNewChat={() => { handleNewChat(); setSidebarOpen(false); }}
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={handleSelectSession}
+        onSelectSession={(id) => { handleSelectSession(id); setSidebarOpen(false); }}
         onDeleteSession={handleDeleteSession}
         appMode={appMode}
         onSetAppMode={setAppMode}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
 
       {/* Main */}
@@ -508,6 +611,8 @@ export default function Page() {
             graphTenantId={config.graphTenantId}
             graphClientId={config.graphClientId}
             graphSiteUrl={config.graphSiteUrl}
+            selectedLine={selectedLine}
+            selectedCategory={selectedCategory}
             selectedSourceId={selectedSource?.id ?? null}
             onSourceSelect={setSelectedSource}
             onAskDocument={handleSearch}
@@ -519,8 +624,18 @@ export default function Page() {
           <div className="flex flex-col h-full overflow-hidden">
 
             {/* ── Slim top bar ─────────────────────────────────────────── */}
-            <div className="shrink-0 flex items-center justify-between px-6 py-2.5 border-b border-slate-100 bg-white">
+            <div className="shrink-0 flex items-center justify-between px-3 md:px-6 py-2.5 border-b border-slate-100 bg-white">
               <div className="flex items-center gap-2">
+                {/* Hamburger — mobile only */}
+                <button
+                  className="md:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors"
+                  onClick={() => setSidebarOpen(true)}
+                  aria-label="Open menu"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                </button>
                 <span
                   className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${
                     isLocalMode
@@ -558,7 +673,7 @@ export default function Page() {
             <div className={`flex-1 overflow-y-auto${appMode !== "knowledge" ? " hidden" : ""}`}>
               {turns.length === 0 ? (
                 /* ── Landing / empty state ── */
-                <div className="max-w-2xl mx-auto px-6 flex flex-col items-center justify-center h-full gap-8 pb-24">
+                <div className="max-w-2xl mx-auto px-4 md:px-6 flex flex-col items-center justify-center h-full gap-8 pb-24">
                   <div className="flex flex-col items-center gap-3 text-center">
                     <div className="w-14 h-14 rounded-2xl bg-sky-600 flex items-center justify-center shadow-lg">
                       <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -616,7 +731,7 @@ export default function Page() {
                   </div>
 
                   {/* Quick-start suggestions */}
-                  <div className="w-full grid grid-cols-2 gap-3">
+                  <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {SUGGESTIONS.map((s) => (
                       <button
                         key={s}
@@ -630,9 +745,13 @@ export default function Page() {
                 </div>
               ) : (
                 /* ── Chat messages ── */
-                <div className="max-w-3xl mx-auto px-6 py-8 flex flex-col gap-8">
+                <div className="max-w-3xl mx-auto px-3 md:px-6 py-8 flex flex-col gap-8">
                   {turns.map((turn, idx) => (
-                    <div key={turn.id} className="flex flex-col gap-3">
+                    <div
+                      key={turn.id}
+                      ref={idx === turns.length - 1 ? latestTurnRef : null}
+                      className="flex flex-col gap-3 scroll-mt-6"
+                    >
 
                       {/* User message */}
                       <div className="flex justify-end">
@@ -833,30 +952,61 @@ export default function Page() {
                                 </div>
                               )}
 
+                              {(turn.slideGroups?.length ?? 0) > 0 && (
+                                <SlideSearchResults
+                                  groups={turn.slideGroups!}
+                                  topicGroups={turn.slideTopicGroups}
+                                  onPreviewSlide={previewFoundSlide}
+                                />
+                              )}
+
                               {/* Document cards */}
                               {(turn.docs?.length ?? 0) > 0 && (
-                                <div>
-                                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Related documents</p>
-                                  <div className="grid grid-cols-2 gap-3">
-                                    {(idx === turns.length - 1 ? turn.docs! : turn.docs!.slice(0, 2)).map((doc) => (
-                                      <Card
-                                        key={doc.id}
-                                        doc={doc}
-                                        onView={(d) =>
-                                          setSelectedSource({
-                                            id: `view-${d.id}`,
-                                            docId: d.id,
-                                            title: d.title,
-                                            slide: 1,
-                                            serviceLine: d.serviceLine,
-                                            filePath: (d as Document & { filePath?: string }).filePath,
-                                            fileType: (d as Document & { fileType?: "pdf" | "pptx" }).fileType,
-                                          })
-                                        }
-                                        onAskAI={(_, prompt) => handleSearch(prompt)}
-                                      />
-                                    ))}
-                                  </div>
+                                <div className="rounded-xl border border-slate-100 bg-slate-50/70">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleRelatedDocs(turn.id)}
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-slate-100/70 transition-colors rounded-xl"
+                                  >
+                                    <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                                      Related documents
+                                      <span className="ml-2 font-medium text-slate-400 normal-case tracking-normal">
+                                        {turn.docs!.length}
+                                      </span>
+                                    </span>
+                                    <svg
+                                      className={`w-4 h-4 text-slate-400 transition-transform ${
+                                        expandedRelatedDocs.has(turn.id) ? "rotate-180" : ""
+                                      }`}
+                                      fill="none"
+                                      viewBox="0 0 24 24"
+                                      stroke="currentColor"
+                                    >
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                  </button>
+                                  {expandedRelatedDocs.has(turn.id) && (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 px-3 pb-3">
+                                      {(idx === turns.length - 1 ? turn.docs! : turn.docs!.slice(0, 2)).map((doc) => (
+                                        <Card
+                                          key={doc.id}
+                                          doc={doc}
+                                          onView={(d) =>
+                                            setSelectedSource({
+                                              id: `view-${d.id}`,
+                                              docId: d.id,
+                                              title: d.title,
+                                              slide: 1,
+                                              serviceLine: d.serviceLine,
+                                              filePath: (d as Document & { filePath?: string }).filePath,
+                                              fileType: (d as Document & { fileType?: Source["fileType"] }).fileType,
+                                            })
+                                          }
+                                          onAskAI={(_, prompt) => handleSearch(prompt)}
+                                        />
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </>
@@ -869,17 +1019,43 @@ export default function Page() {
                       </div>
                     </div>
                   ))}
-
-                  <div ref={bottomRef} />
                 </div>
               )}
             </div>
 
             {/* ── Fixed input bar ───────────────────────────────────────── */}
-            <div className={`shrink-0 border-t border-slate-100 bg-white px-6 pt-3 pb-4${appMode !== "knowledge" ? " hidden" : ""}`}>
+            <div className={`shrink-0 border-t border-slate-100 bg-white px-3 md:px-6 pt-3 pb-4${appMode !== "knowledge" ? " hidden" : ""}`}>
               <div className="max-w-3xl mx-auto flex flex-col gap-2">
-                {/* Search mode toggle */}
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2 md:gap-3">
+                  <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
+                    <button
+                      onClick={() => setQueryMode("answer")}
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                        queryMode === "answer"
+                          ? "bg-white text-slate-700 shadow-sm"
+                          : "text-slate-400 hover:text-slate-600"
+                      }`}
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h8M8 14h5m-9 6l2.5-2.5H18a3 3 0 003-3V7a3 3 0 00-3-3H6a3 3 0 00-3 3v7.5a3 3 0 003 3H4z" />
+                      </svg>
+                      Answer
+                    </button>
+                    <button
+                      onClick={() => setQueryMode("slides")}
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                        queryMode === "slides"
+                          ? "bg-white text-sky-700 shadow-sm"
+                          : "text-slate-400 hover:text-slate-600"
+                      }`}
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm4 15h8m-4-4v4" />
+                      </svg>
+                      Find Slides
+                    </button>
+                  </div>
+
                   <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
                     <button
                       onClick={() => setSearchMode("rag")}
@@ -916,8 +1092,28 @@ export default function Page() {
                       Uses server Tavily key when configured
                     </button>
                   )}
+                  {uploadStatus && (
+                    <span className={`text-[11px] px-2.5 py-1 rounded-full border ${
+                      uploadStatus.startsWith("Upload failed")
+                        ? "text-red-700 bg-red-50 border-red-200"
+                        : "text-emerald-700 bg-emerald-50 border-emerald-200"
+                    }`}>
+                      {uploadStatus}
+                    </span>
+                  )}
                 </div>
-                <ChatInput onSend={handleSearch} onStop={handleStop} isLoading={isAnyLoading} />
+                <ChatInput
+                  onSend={handleSearch}
+                  onStop={handleStop}
+                  onUploadFiles={handleContentUpload}
+                  isLoading={isAnyLoading}
+                  uploadDisabled={uploadingContent}
+                  uploadFileNames={uploadFileNames}
+                  isUploading={uploadingContent}
+                  onRemoveUploadFile={(index) =>
+                    setUploadFileNames((prev) => prev.filter((_, i) => i !== index))
+                  }
+                />
               </div>
             </div>
 
@@ -925,23 +1121,24 @@ export default function Page() {
         )}
       </main>
 
-      {/* Right panel */}
-      {showLocalPreview && selectedSource ? (
-        <LocalDocPreview
-          source={selectedSource}
-          activeDeck={activeDeck}
-          decks={slideDecks}
-          activeDeckId={activeDeckId}
-          onSetActiveDeck={(deckId) => { setActiveDeckId(deckId); setDeckError(""); }}
-          onCreateDeck={createSlideDeck}
-          onToggleDeckSlide={toggleDeckSlide}
-          onClearDeck={clearActiveDeck}
-          onExportDeck={exportActiveDeck}
-          deckExporting={deckExporting}
-          deckError={deckError}
-        />
-      ) : (
-        <PreviewPanel source={selectedSource} />
+      {/* Right panel: fixed full-screen on mobile, side panel on desktop */}
+      {selectedSource && (
+        <div className="fixed inset-0 z-50 md:static md:inset-auto md:z-auto flex">
+          {showLocalPreview ? (
+            <LocalDocPreview
+              source={selectedSource}
+              activeDeck={activeDeck}
+              onToggleDeckSlide={toggleDeckSlide}
+              onClearDeck={clearActiveDeck}
+              onExportDeck={exportActiveDeck}
+              onClose={() => setSelectedSource(null)}
+              deckExporting={deckExporting}
+              deckError={deckError}
+            />
+          ) : (
+            <PreviewPanel source={selectedSource} onClose={() => setSelectedSource(null)} />
+          )}
+        </div>
       )}
 
       {/* Settings */}

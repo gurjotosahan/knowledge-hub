@@ -1,6 +1,7 @@
 // Server-side only — used exclusively in Next.js API routes (Node.js runtime)
 import { readFile } from "fs/promises";
 import { extname, basename } from "path";
+import type { SearchableFileType } from "@/types";
 
 export interface ExtractedSlide {
   number: number;
@@ -10,7 +11,7 @@ export interface ExtractedSlide {
 export interface ExtractedDoc {
   fileName: string;
   filePath: string;
-  fileType: "pdf" | "pptx";
+  fileType: SearchableFileType;
   totalSlides: number;
   slides: ExtractedSlide[];
 }
@@ -26,6 +27,10 @@ export async function extractDoc(filePath: string): Promise<ExtractedDoc> {
   if (ext === ".pptx") {
     const slides = await extractPptxSlides(filePath);
     return { fileName, filePath, fileType: "pptx", totalSlides: slides.length, slides };
+  }
+  if (ext === ".docx") {
+    const slides = await extractDocxSections(filePath);
+    return { fileName, filePath, fileType: "docx", totalSlides: slides.length, slides };
   }
   throw new Error(`Unsupported file type: ${ext}`);
 }
@@ -93,4 +98,44 @@ async function extractPptxSlides(filePath: string): Promise<ExtractedSlide[]> {
   }
 
   return slides;
+}
+
+function decodeXmlText(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'");
+}
+
+async function extractDocxSections(filePath: string): Promise<ExtractedSlide[]> {
+  const buffer = await readFile(filePath);
+  const JSZip = (await import("jszip")).default;
+  const zip = await JSZip.loadAsync(buffer);
+  const xml = await zip.files["word/document.xml"]?.async("text");
+  if (!xml) return [];
+
+  const paragraphs = Array.from(xml.matchAll(/<w:p[\s\S]*?<\/w:p>/g))
+    .map((p) => Array.from(p[0].matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g))
+      .map((m) => decodeXmlText(m[1]))
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim())
+    .filter(Boolean);
+
+  const sections: ExtractedSlide[] = [];
+  let current = "";
+  for (const para of paragraphs) {
+    const next = current ? `${current}\n${para}` : para;
+    if (next.length > 2500 && current) {
+      sections.push({ number: sections.length + 1, text: current });
+      current = para;
+    } else {
+      current = next;
+    }
+  }
+  if (current) sections.push({ number: sections.length + 1, text: current });
+
+  return sections.length ? sections : [{ number: 1, text: "" }];
 }

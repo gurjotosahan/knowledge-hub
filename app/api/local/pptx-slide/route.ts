@@ -167,11 +167,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const JSZip  = (await import("jszip")).default;
     const zip    = await JSZip.loadAsync(buffer);
 
-    // ── Presentation dimensions ──
+    // ── Presentation dimensions & slide count ──
     const presXml = (await zip.files["ppt/presentation.xml"]?.async("text")) ?? "";
     const sldSzM  = presXml.match(/<p:sldSz\s+cx="(\d+)"\s+cy="(\d+)"/);
     const slideW  = sldSzM ? +sldSzM[1] : 9144000;
     const slideH  = sldSzM ? +sldSzM[2] : 5143500;
+    const totalSlides = (presXml.match(/<p:sldId\b/g) ?? []).length;
 
     // ── Slide XML & its rel map ──
     const slideXml = await zip.files[`ppt/slides/slide${slideNum}.xml`]?.async("text");
@@ -259,6 +260,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const result: PptxSlideData = {
       slideEmuWidth: slideW,
       slideEmuHeight: slideH,
+      totalSlides,
       background,
       backgroundMediaPath,
       shapes,

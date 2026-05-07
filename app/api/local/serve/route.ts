@@ -7,6 +7,7 @@ import { Readable } from "stream";
 const MIME: Record<string, string> = {
   ".pdf":  "application/pdf",
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
 
 export async function GET(req: NextRequest) {

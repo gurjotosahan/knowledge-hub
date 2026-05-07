@@ -16,9 +16,10 @@ const DISPLAY_H = Math.round(DESIGN_H * SCALE);
 
 interface PreviewPanelProps {
   source: Source | null;
+  onClose?: () => void;
 }
 
-export default function PreviewPanel({ source }: PreviewPanelProps) {
+export default function PreviewPanel({ source, onClose }: PreviewPanelProps) {
   const activeRef = useRef<HTMLDivElement>(null);
   const [modal, setModal] = useState<{
     slideNumber: number;
@@ -42,25 +43,39 @@ export default function PreviewPanel({ source }: PreviewPanelProps) {
 
   return (
     <aside
-      className="flex flex-col h-screen shrink-0 bg-white border-l border-slate-200"
-      style={{ width: 400 }}
+      className="flex flex-col w-full md:w-[400px] h-screen shrink-0 bg-white border-l border-slate-200"
     >
       {/* Header */}
       <div className="px-5 py-4 border-b border-slate-100 shrink-0">
         {source ? (
-          <div className="flex flex-col gap-0.5">
-            <h2 className="text-sm font-semibold text-slate-800 truncate">
-              {source.title}
-            </h2>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-slate-400">{source.serviceLine}</span>
-              <span className="text-slate-200">·</span>
-              <span className="text-xs text-slate-400">{slides.length} slides</span>
-              <span className="text-slate-200">·</span>
-              <span className="text-xs text-sky-600 font-medium">
-                Slide {source.slide} referenced
-              </span>
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold text-slate-800 truncate">
+                {source.title}
+              </h2>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-slate-400">{source.serviceLine}</span>
+                <span className="text-slate-200">·</span>
+                <span className="text-xs text-slate-400">{slides.length} slides</span>
+                <span className="text-slate-200">·</span>
+                <span className="text-xs text-sky-600 font-medium">
+                  Slide {source.slide} referenced
+                </span>
+              </div>
             </div>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                aria-label="Close preview"
+                title="Close preview"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
           </div>
         ) : (
           <h2 className="text-sm font-semibold text-slate-700">Slide Preview</h2>
