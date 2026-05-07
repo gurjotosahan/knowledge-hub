@@ -1,0 +1,16 @@
+{
+  "id": "1777952438201",
+  "clientName": "caretria",
+  "createdAt": "2026-05-05T03:40:38.201Z",
+  "selectedSections": [
+    "buying"
+  ],
+  "sections": [
+    {
+      "id": "buying",
+      "title": "Buying Group Mapping",
+      "emoji": "🎯",
+      "content": "To engage **CareTria** (formerly Knipper Health) effectively, Apexon must target the leadership managing their newly unified platform, which integrates **eBlu Solutions** and their core pharma services. Focus on the 'Quality Council' and growing Digital Health leadership.\n\n### **1. The Digital & Product Visionaries (Primary Targets)**\n*   **Chief Product Officer / VP Digital Health:** (e.g., **Tracy R.**, Product Leadership at CareTria). They are responsible for the 'Integrated Platform' roadmap. \n    *   **Apexon Opening:** Pitch **Digital Engineering** for modernizing the eBlu integration and **Digital Experience** to ensure a seamless UI/UX for providers during therapy initiation.\n*   **Chief Digital Officer / AI Lead:** Given CareTria’s focus on 60-second benefit investigations, they need heavy AI/Automation.\n    *   **Apexon Opening:** Propose **Data & AI** (specifically GenAI/LLM) to further automate medical record review and benefit verification.\n\n### **2. The Quality & Compliance Gatekeepers (The Influencers)**\n*   **The CareTria Quality Council:** This cross-functional group (Executive Team + Quality Assurance) meets monthly to review performance.\n    *   **Apexon Opening:** Introduce **Quality Engineering** and **Cybersecurity** services to bolster their GXP/HIPAA audit readiness and automate regression testing for their high-frequency fulfillment systems.\n*   **General Counsel & Chief Compliance Officer:** High concern for data privacy (CCPA/HIPAA) as they handle sensitive patient medical information from pharma partners.\n    *   **Apexon Opening:** Offer **Data Governance** and Zero Trust architecture from our Cybersecurity line.\n\n### **3. The Operational Growth Leaders (The Budget Holders)**\n*   **Alexis Rose (President, 3PL & Distribution) & Champ Burgess (President, Pharmacy Services):** Their KPIs rely on 'Speed to Therapy.' Any latency in the software platform hurts their bottom line.\n    *   **Apexon Opening:** Pitch **Cloud Services** (FinOps and Performance Engineering) to ensure 100% uptime and scalability during peak prescription periods.\n\n### **Engagement Strategy Hypothesis:**\n*   **Entry Point:** Start with **Quality Engineering (Testing Automation)**. CareTria's frequent rebranding and acquisitions suggest a complex legacy codebase. Offering a 'Shift-Left' QA strategy for their Patient Access Solutions ensures that new feature rollouts don't break the critical 60-second enrollment workflow.\n*   **Service Line Lead:** **Quality Engineering** first, followed by **Digital Engineering** for platform consolidation."
+    }
+  ]
+}
