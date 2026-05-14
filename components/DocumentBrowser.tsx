@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DocumentCategory, LocalSourceEntry, ServiceLine, Source, SourceType } from "@/types";
+import type { AIProvider, DocumentCategory, LocalSourceEntry, ServiceLine, Source, SourceType } from "@/types";
 
 interface DocumentBrowserProps {
   rootFolder: string;
@@ -19,6 +19,13 @@ interface DocumentBrowserProps {
   onOpenSettings: () => void;
   ollamaBaseUrl?: string;
   ollamaEmbedModel?: string;
+  enableAssetLlmEnrichment?: boolean;
+  aiProvider?: AIProvider;
+  ollamaModel?: string;
+  openrouterApiKey?: string;
+  openrouterModel?: string;
+  geminiApiKey?: string;
+  geminiModel?: string;
 }
 
 function formatBytes(size?: number) {
@@ -81,6 +88,13 @@ export default function DocumentBrowser({
   onOpenSettings,
   ollamaBaseUrl = "http://localhost:11434",
   ollamaEmbedModel = "nomic-embed-text",
+  enableAssetLlmEnrichment = false,
+  aiProvider,
+  ollamaModel,
+  openrouterApiKey,
+  openrouterModel,
+  geminiApiKey,
+  geminiModel,
 }: DocumentBrowserProps) {
   const isGraph = sourceType === "sharepoint";
 
@@ -259,10 +273,28 @@ export default function DocumentBrowser({
           siteUrl: graphSiteUrl,
           ollamaBaseUrl,
           embedModel: ollamaEmbedModel,
+          enableAssetLlmEnrichment,
+          aiProvider,
+          ollamaModel,
+          openrouterApiKey,
+          openrouterModel,
+          geminiApiKey,
+          geminiModel,
         };
       } else {
         url = "/api/local/index";
-        bodyPayload = { folderPath: rootFolder, ollamaBaseUrl, embedModel: ollamaEmbedModel };
+        bodyPayload = {
+          folderPath: rootFolder,
+          ollamaBaseUrl,
+          embedModel: ollamaEmbedModel,
+          enableAssetLlmEnrichment,
+          aiProvider,
+          ollamaModel,
+          openrouterApiKey,
+          openrouterModel,
+          geminiApiKey,
+          geminiModel,
+        };
       }
 
       const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyPayload) });

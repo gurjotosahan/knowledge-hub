@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { readFile, access, mkdir } from "fs/promises";
+import { readFile, access, mkdir, stat } from "fs/promises";
 import { createHash } from "crypto";
 import { join, basename } from "path";
 import { tmpdir } from "os";
@@ -10,6 +10,7 @@ export const maxDuration = 300;
 
 const execAsync = promisify(exec);
 const CACHE_DIR  = join(tmpdir(), "kh-pdf-cache");
+const PDF_CACHE_VERSION = "v2";
 
 // In-memory lock — prevents parallel conversions of the same file
 const locks = new Map<string, Promise<string>>();
@@ -72,7 +73,10 @@ async function convertToPdf(filePath: string, outDir: string): Promise<string> {
 async function ensureConverted(filePath: string): Promise<string> {
   await mkdir(CACHE_DIR, { recursive: true });
 
-  const key     = createHash("md5").update(filePath).digest("hex");
+  const fileStat = await stat(filePath);
+  const key     = createHash("md5")
+    .update(`${PDF_CACHE_VERSION}:${filePath}:${fileStat.size}:${fileStat.mtimeMs}`)
+    .digest("hex");
   const stem    = basename(filePath).replace(/\.[^.]+$/, "");
   const pdfPath = join(CACHE_DIR, `${key}-${stem}.pdf`);
 

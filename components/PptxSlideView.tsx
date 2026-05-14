@@ -99,7 +99,7 @@ export default function PptxSlideView({ filePath, slideNumber, displayWidth }: P
               <img
                 src={mediaUrl(img.mediaPath)}
                 alt=""
-                style={{ width: "100%", height: "100%", objectFit: "fill", display: "block" }}
+                style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
               />
             </div>
           );

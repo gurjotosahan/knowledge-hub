@@ -1,11 +1,367 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { extname, basename } from "path";
+import { readFile, unlink, writeFile } from "fs/promises";
+import { randomUUID } from "crypto";
+import { spawn } from "child_process";
+import { tmpdir } from "os";
+import { extname, basename, join } from "path";
+import JSZip from "jszip";
 
 interface ComposeBody {
   templatePath: string;
   slides: Array<{ filePath: string; slideNumber: number }>;
   title?: string;
+  engine?: "zip" | "automizer" | "aspose" | "aspose-foss";
+}
+
+function pptxResponse(output: Buffer, filename: string, engine?: string): NextResponse {
+  if (process.env.NODE_ENV !== "production") {
+    writeFile("/private/tmp/knowledge-hub-last-composed.pptx", output).catch(() => undefined);
+  }
+  if (engine) console.log(`[compose-pptx] engine used: ${engine}, bytes: ${output.length}`);
+
+  return new NextResponse(output as unknown as BodyInit, {
+    headers: {
+      "Content-Type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": String(output.length),
+      ...(engine ? { "X-Compose-Engine": engine } : {}),
+    },
+  });
+}
+
+interface SlideSize {
+  cx: number;
+  cy: number;
+}
+
+function parseSlideSize(presentationXml: string): SlideSize | null {
+  const match = presentationXml.match(/<p:sldSz\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/);
+  if (!match) return null;
+  return { cx: Number(match[1]), cy: Number(match[2]) };
+}
+
+function setSlideSize(presentationXml: string, size: SlideSize): string {
+  return presentationXml.replace(
+    /<p:sldSz\b[^>]*\/>/,
+    (tag) => tag.replace(/\bcx="\d+"/, `cx="${size.cx}"`).replace(/\bcy="\d+"/, `cy="${size.cy}"`)
+  );
+}
+
+async function readPptxSlideSize(filePath: string): Promise<SlideSize | null> {
+  const zip = await JSZip.loadAsync(await readFile(filePath));
+  const presentationXml = await zip.files["ppt/presentation.xml"]?.async("text");
+  return presentationXml ? parseSlideSize(presentationXml) : null;
+}
+
+async function makeRootWithSlideSize(templatePath: string, size: SlideSize): Promise<string> {
+  const zip = await JSZip.loadAsync(await readFile(templatePath));
+  const presentationPath = "ppt/presentation.xml";
+  const presentationXml = await zip.files[presentationPath]?.async("text");
+  if (!presentationXml) throw new Error("Invalid PPTX template");
+
+  zip.file(presentationPath, setSlideSize(presentationXml, size));
+  const output = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  const outputPath = join(tmpdir(), `knowledge-hub-root-${randomUUID()}.pptx`);
+  await writeFile(outputPath, output);
+  return outputPath;
+}
+
+async function getOrderedSlidePaths(zip: JSZip): Promise<string[]> {
+  const presentationXml = await zip.files["ppt/presentation.xml"]?.async("text");
+  const relsXml = await zip.files["ppt/_rels/presentation.xml.rels"]?.async("text");
+  if (!presentationXml || !relsXml) return [];
+
+  const targetByRelId = new Map(parseRels(relsXml).map((rel) => [rel.id, rel.target]));
+  const slideList = presentationXml.match(/<p:sldIdLst\b[^>]*>([\s\S]*?)<\/p:sldIdLst>/)?.[1] ?? "";
+  const paths: string[] = [];
+
+  for (const match of slideList.matchAll(/<p:sldId\b[^>]*\/>/g)) {
+    const relId = attr(match[0], "r:id");
+    const target = relId ? targetByRelId.get(relId) : null;
+    if (!target) continue;
+    paths.push(target.startsWith("ppt/") ? target : `ppt/${target.replace(/^\.\.\//, "")}`);
+  }
+
+  return paths;
+}
+
+
+// Add a coordinate-system shift on the slide's root <p:spTree><p:grpSpPr> so children render at
+// their native size, centered on the canvas. This is the "Ensure Fit" behaviour PowerPoint
+// uses when you change a deck's slide size — preserves geometry instead of stretching.
+//
+// PowerPoint maps child coords from chOff/chExt space onto off/ext space. With ext = chExt
+// (no scaling) and chOff = (-dx, -dy), every child renders at child_off + (dx, dy).
+function centerSlideOnCanvas(slideXml: string, source: SlideSize, target: SlideSize): string {
+  if (source.cx === target.cx && source.cy === target.cy) return slideXml;
+
+  const dx = Math.round((target.cx - source.cx) / 2);
+  const dy = Math.round((target.cy - source.cy) / 2);
+  const xfrm = `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${target.cx}" cy="${target.cy}"/><a:chOff x="${-dx}" y="${-dy}"/><a:chExt cx="${target.cx}" cy="${target.cy}"/></a:xfrm>`;
+
+  // Anchor on </p:nvGrpSpPr> so we only touch the spTree's grpSpPr, not nested groups inside
+  // shapes. Two shapes the empty grpSpPr is usually written in.
+  const afterNv = /(<\/p:nvGrpSpPr>\s*)<p:grpSpPr\s*\/>/;
+  if (afterNv.test(slideXml)) {
+    return slideXml.replace(afterNv, `$1<p:grpSpPr>${xfrm}</p:grpSpPr>`);
+  }
+  const afterNvEmpty = /(<\/p:nvGrpSpPr>\s*)<p:grpSpPr>\s*<\/p:grpSpPr>/;
+  if (afterNvEmpty.test(slideXml)) {
+    return slideXml.replace(afterNvEmpty, `$1<p:grpSpPr>${xfrm}</p:grpSpPr>`);
+  }
+  // grpSpPr already populated (rare — slide already has its own group transform). Leave alone:
+  // overwriting risks breaking whatever it encodes, and most decks use the empty form above.
+  return slideXml;
+}
+
+async function normalizeComposedOutput(
+  output: Buffer,
+  slides: ComposeBody["slides"],
+  targetSize: SlideSize,
+): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(output);
+  const presentationPath = "ppt/presentation.xml";
+  const presentationXml = await zip.files[presentationPath]?.async("text");
+  if (presentationXml) zip.file(presentationPath, setSlideSize(presentationXml, targetSize));
+
+  // Each slide keeps its native geometry — no linear rescaling (which stretches/squashes
+  // mismatched-aspect slides). Slides smaller than the canvas get centered via a group
+  // transform; slides matching the canvas are left untouched.
+  const slidePaths = await getOrderedSlidePaths(zip);
+  const sizeByPath = new Map<string, SlideSize | null>();
+
+  for (let i = 0; i < slides.length; i++) {
+    const item = slides[i];
+    if (!sizeByPath.has(item.filePath)) {
+      sizeByPath.set(item.filePath, await readPptxSlideSize(item.filePath).catch(() => null));
+    }
+    const sourceSize = sizeByPath.get(item.filePath);
+    if (!sourceSize) continue;
+
+    const slidePath = slidePaths[i] ?? `ppt/slides/slide${i + 1}.xml`;
+    const slideXml = await zip.files[slidePath]?.async("text");
+    if (!slideXml) continue;
+
+    zip.file(slidePath, centerSlideOnCanvas(slideXml, sourceSize, targetSize));
+  }
+
+  await repairZipPackage(zip);
+
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+}
+
+// Defense-in-depth: walk every .rels file, drop relationships whose target part is missing
+// from the zip, strip references to those rel IDs from the corresponding XML body, and prune
+// Content_Types Overrides for parts that don't exist. Catches issues from both the ZIP merger
+// (charts/diagrams we drop) and Automizer (master media refs it sometimes mishandles).
+async function repairZipPackage(zip: JSZip): Promise<void> {
+  const fileSet = new Set(Object.keys(zip.files).filter((k) => !zip.files[k].dir));
+
+  // 1. Clean broken rels
+  const relsFiles = [...fileSet].filter((f) => /\.rels$/.test(f));
+  for (const relsFile of relsFiles) {
+    const xml = await zip.files[relsFile].async("text");
+    // Subject of "X/_rels/Y.rels" is "X/Y"; targets resolve relative to "X". For the package
+    // root rels file "_rels/.rels", the filename ".rels" wouldn't match [^/]+\.rels, so the
+    // pattern uses [^/]* to also match the empty stem.
+    const realBase = relsFile.replace(/(?:^|\/)_rels\/[^/]*\.rels$/, "").replace(/\/$/, "");
+    const allRels = parseRels(xml);
+
+    const kept: Rel[] = [];
+    const dropped: string[] = [];
+    for (const rel of allRels) {
+      if (rel.mode === "External") { kept.push(rel); continue; }
+      // OPC allows absolute targets (starting with "/") — resolve from package root.
+      let resolved: string;
+      if (rel.target.startsWith("/")) {
+        resolved = rel.target.slice(1);
+      } else {
+        const baseSegs = realBase.split("/").filter(Boolean);
+        for (const s of rel.target.split("/")) {
+          if (s === "..") baseSegs.pop();
+          else if (s !== ".") baseSegs.push(s);
+        }
+        resolved = baseSegs.join("/");
+      }
+      if (fileSet.has(resolved)) kept.push(rel);
+      else dropped.push(rel.id);
+    }
+
+    if (dropped.length === 0) continue;
+    zip.file(relsFile, buildRelsXml(kept));
+
+    // Strip references from the XML body that this .rels file describes (e.g.,
+    // ppt/slides/_rels/slide1.xml.rels  →  ppt/slides/slide1.xml)
+    const bodyPath = relsFile.replace(/_rels\/([^/]+)\.rels$/, "$1");
+    const body = await zip.files[bodyPath]?.async("text");
+    if (body) zip.file(bodyPath, dropRefs(body, dropped));
+  }
+
+  // 2. Prune Content_Types overrides for parts that don't exist
+  const ctPath = "[Content_Types].xml";
+  let ctXml = await zip.files[ctPath]?.async("text") ?? "";
+  if (ctXml) {
+    ctXml = ctXml.replace(/<Override\s[^>]*\bPartName="([^"]+)"[^>]*\/>\s*/g, (tag, partName: string) => {
+      const part = partName.replace(/^\//, "");
+      return fileSet.has(part) ? tag : "";
+    });
+
+    // 2b. Add missing Default entries for media extensions present in the zip but not
+    // registered (Aspose eval mode can add .emf/.wmf watermark assets without registering them).
+    const registeredExts = new Set(
+      [...ctXml.matchAll(/<Default\s[^>]*Extension="([^"]+)"/g)].map((m) => m[1].toLowerCase())
+    );
+    const missingLines: string[] = [];
+    for (const path of fileSet) {
+      const ext = extname(path).slice(1).toLowerCase();
+      if (!ext || registeredExts.has(ext)) continue;
+      const mime = MIME[`.${ext}`];
+      if (mime) {
+        missingLines.push(`<Default Extension="${ext}" ContentType="${mime}"/>`);
+        registeredExts.add(ext);
+      }
+    }
+    if (missingLines.length) ctXml = ctXml.replace("</Types>", missingLines.join("\n") + "\n</Types>");
+
+    zip.file(ctPath, ctXml);
+  }
+
+  // 3. Fix presentation.xml: sync app.xml slide count and strip stale section refs.
+  // Templates often have sections ("Appendix", "Testing", etc.) whose p14:sldId entries
+  // point to template slides that no longer exist in the composed output — PowerPoint
+  // silently repairs (and removes) these, which causes the "repaired content" dialog.
+  let presXml = await zip.files["ppt/presentation.xml"]?.async("text") ?? "";
+  const sldCount = [...presXml.matchAll(/<p:sldId\b/g)].length;
+
+  if (presXml.includes("sectionLst")) {
+    const validSldIds = new Set(
+      [...presXml.matchAll(/<p:sldId\b[^>]*\bid="(\d+)"/g)].map((m) => m[1])
+    );
+    const before = presXml;
+    // Drop individual stale <p14:sldId id="X"/> / <p15:sldId id="X"/> entries.
+    presXml = presXml.replace(/<p1[45]:sldId\b[^>]*\/>/g, (tag) => {
+      const id = tag.match(/\bid="(\d+)"/)?.[1];
+      return id && validSldIds.has(id) ? tag : "";
+    });
+    // Remove sections that became empty (self-closing or empty sldIdLst).
+    presXml = presXml.replace(
+      /<p1[45]:section\b[^>]*>\s*<p1[45]:sldIdLst\s*\/>\s*<\/p1[45]:section>/g, ""
+    );
+    presXml = presXml.replace(
+      /<p1[45]:section\b[^>]*>\s*<p1[45]:sldIdLst>\s*<\/p1[45]:sldIdLst>\s*<\/p1[45]:section>/g, ""
+    );
+    if (presXml !== before) zip.file("ppt/presentation.xml", presXml);
+  }
+
+  const appPath = "docProps/app.xml";
+  const appXml = await zip.files[appPath]?.async("text").catch(() => null);
+  if (appXml && sldCount > 0) {
+    const titles = Array.from({ length: sldCount }, (_, i) => `Slide ${i + 1}`);
+    zip.file(appPath, rebuildAppXml(updateSlideCount(appXml, sldCount), titles));
+  }
+}
+
+async function composeWithAspose(body: ComposeBody, useLicense = true): Promise<Buffer> {
+  const outputPath = join(tmpdir(), `knowledge-hub-aspose-${randomUUID()}.pptx`);
+  // FOSS engine uses a separate script (aspose-slides-foss, MIT, no watermark).
+  // Commercial engine uses aspose-compose.py (eval watermark without a license file).
+  const scriptPath = join(
+    process.cwd(), "scripts",
+    useLicense ? "aspose-compose.py" : "aspose-foss-compose.py"
+  );
+  const python = process.env.ASPOSE_PYTHON_BIN || process.env.PYTHON_BIN || "python3";
+
+  try {
+    const input = JSON.stringify({
+      templatePath: body.templatePath,
+      slides: body.slides,
+      outputPath,
+    });
+
+    // Aspose.Slides for Python (.NET runtime) needs libgdiplus on macOS — typically at
+    // /opt/homebrew/lib (Apple Silicon) or /usr/local/lib (Intel). Surface it via DYLD path
+    // so the user doesn't have to export it before launching `npm run dev`.
+    const env = { ...process.env };
+    if (process.platform === "darwin") {
+      const existing = env.DYLD_FALLBACK_LIBRARY_PATH ?? "";
+      const homebrewLibs = ["/opt/homebrew/lib", "/usr/local/lib"];
+      env.DYLD_FALLBACK_LIBRARY_PATH = [existing, ...homebrewLibs].filter(Boolean).join(":");
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(python, [scriptPath], { stdio: ["pipe", "pipe", "pipe"], env });
+      let stderr = "";
+      proc.stderr.on("data", (d) => { stderr += d.toString(); });
+      proc.on("error", (err) => reject(new Error(`aspose-compose spawn failed: ${err.message}. Ensure '${python}' is on PATH and the required package is installed (aspose-slides or aspose-slides-foss).`)));
+      proc.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`aspose-compose exited ${code}: ${stderr.slice(-500) || "(no stderr)"}`));
+      });
+      proc.stdin.write(input);
+      proc.stdin.end();
+    });
+
+    // Run repairZipPackage as defense-in-depth (Aspose handles masters/layouts correctly itself,
+    // but the post-processing also normalizes Content_Types and app.xml).
+    const buf = await readFile(outputPath);
+    const zip = await JSZip.loadAsync(buf);
+    await repairZipPackage(zip);
+    return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  } finally {
+    await unlink(outputPath).catch(() => undefined);
+  }
+}
+
+async function composeWithAutomizer(body: ComposeBody): Promise<Buffer> {
+  let Automizer: any;
+  try {
+    Automizer = (await import("pptx-automizer")).Automizer;
+  } catch {
+    throw new Error("pptx-automizer is not installed. Run: npm install pptx-automizer");
+  }
+
+  const outputPath = join(tmpdir(), `knowledge-hub-automizer-${randomUUID()}.pptx`);
+  let rootPath = body.templatePath;
+  const sourceAliases = new Map<string, string>();
+  const sourcePaths = [...new Set(body.slides.map((slide) => slide.filePath))];
+
+  try {
+    // Template-wins: the user's branded canvas defines the target aspect ratio. Fall back to
+    // the first import only if the template has no slide size defined.
+    const targetSize = (await readPptxSlideSize(body.templatePath))
+      ?? (await readPptxSlideSize(body.slides[0]?.filePath ?? ""));
+    if (!targetSize) throw new Error("Could not read PPTX slide size.");
+
+    rootPath = await makeRootWithSlideSize(body.templatePath, targetSize);
+
+    const automizer = new Automizer({
+      autoImportSlideMasters: true,
+      removeExistingSlides: true,
+      assertRelatedContents: false,
+      cleanup: false,
+      verbosity: 0,
+    });
+
+    automizer.loadRoot(rootPath);
+    sourcePaths.forEach((filePath, index) => {
+      const alias = `source-${index}`;
+      sourceAliases.set(filePath, alias);
+      automizer.load(filePath, alias);
+    });
+
+    for (const item of body.slides) {
+      const alias = sourceAliases.get(item.filePath);
+      if (alias && Number.isInteger(item.slideNumber) && item.slideNumber > 0) {
+        automizer.addSlide(alias, item.slideNumber);
+      }
+    }
+
+    await automizer.write(outputPath);
+    return normalizeComposedOutput(await readFile(outputPath), body.slides, targetSize);
+  } finally {
+    if (rootPath !== body.templatePath) await unlink(rootPath).catch(() => undefined);
+    await unlink(outputPath).catch(() => undefined);
+  }
 }
 
 // ── XML / rels helpers ────────────────────────────────────────────────────────
@@ -86,6 +442,54 @@ function applyIdMap(xml: string, map: Map<string, string>): string {
   return xml;
 }
 
+// Strip references to rel IDs that we deliberately dropped (notesSlide, charts, OLE objects,
+// tags, diagrams — anything we can't safely copy). Without this, slide XML keeps r:id="rIdX"
+// pointing to a rel we didn't write, producing PowerPoint repair errors.
+//
+// For image embeds (r:embed), removing the attribute alone leaves <a:blip/> with no source,
+// which PowerPoint flags as a repair error. Remove the enclosing <p:pic> or <p:graphicFrame>
+// instead. For r:id / r:link (hyperlinks, etc.) stripping the attribute is safe.
+function dropRefs(xml: string, ids: Iterable<string>): string {
+  const idSet = new Set(ids);
+  for (const id of idSet) {
+    // Remove any <p:pic> whose blipFill references this id (image embed).
+    xml = xml.replace(
+      new RegExp(`<p:pic\\b[^>]*>(?:(?!<p:pic\\b).)*?r:embed="${id}"[\\s\\S]*?</p:pic>`, "g"),
+      ""
+    );
+    // Remove any <p:graphicFrame> that references this id (chart, OLE, diagram).
+    xml = xml.replace(
+      new RegExp(`<p:graphicFrame\\b[^>]*>[\\s\\S]*?r:id="${id}"[\\s\\S]*?</p:graphicFrame>`, "g"),
+      ""
+    );
+    // Fallback: strip remaining bare attribute references (hyperlinks, notes, tags).
+    xml = xml
+      .replaceAll(` r:id="${id}"`, "")
+      .replaceAll(` r:embed="${id}"`, "")
+      .replaceAll(` r:link="${id}"`, "");
+  }
+  return xml;
+}
+
+function escapeXmlAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Update docProps/app.xml so HeadingPairs and TitlesOfParts match the rebuilt slide list.
+// Stale entries here are a known source of "PowerPoint found a problem" repair warnings.
+function rebuildAppXml(xml: string, slideTitles: string[]): string {
+  const n = slideTitles.length;
+  let out = xml.replace(
+    /(<vt:lpstr>Slide Titles<\/vt:lpstr>\s*<\/vt:variant>\s*<vt:variant>\s*<vt:i4>)\d+(<\/vt:i4>)/,
+    `$1${n}$2`
+  );
+  out = out.replace(
+    /(<TitlesOfParts>\s*<vt:vector\s+size=")\d+("\s+baseType="lpstr">)[\s\S]*?(<\/vt:vector>\s*<\/TitlesOfParts>)/,
+    `$1${n}$2${slideTitles.map((t) => `<vt:lpstr>${escapeXmlAttr(t)}</vt:lpstr>`).join("")}$3`
+  );
+  return out;
+}
+
 function escapeFileName(s: string): string {
   return s.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "composed";
 }
@@ -141,6 +545,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!/\.pptx$/i.test(templatePath))
     return NextResponse.json({ error: "Template must be a PPTX file" }, { status: 415 });
 
+  const engine = body.engine
+    ?? ((process.env.PPTX_MERGE_ENGINE as ComposeBody["engine"]) || "automizer");
+  if (engine === "aspose") {
+    try {
+      const output = await composeWithAspose(body);
+      const fileTitle = title?.trim() || basename(templatePath).replace(/\.pptx$/i, "");
+      return pptxResponse(output, `${escapeFileName(fileTitle)}-composed.pptx`, "aspose");
+    } catch (err) {
+      console.error("[compose-pptx] Aspose failed; falling back to ZIP merger", err);
+    }
+  }
+  if (engine === "aspose-foss") {
+    try {
+      const output = await composeWithAspose(body, false);
+      const fileTitle = title?.trim() || basename(templatePath).replace(/\.pptx$/i, "");
+      return pptxResponse(output, `${escapeFileName(fileTitle)}-aspose-foss.pptx`, "aspose-foss");
+    } catch (err) {
+      console.error("[compose-pptx] Aspose FOSS failed; falling back to ZIP merger", err);
+    }
+  }
+  if (engine === "automizer") {
+    try {
+      const output = await composeWithAutomizer(body);
+      const fileTitle = title?.trim() || basename(templatePath).replace(/\.pptx$/i, "");
+      return pptxResponse(output, `${escapeFileName(fileTitle)}-composed.pptx`, "automizer");
+    } catch (err) {
+      console.error("[compose-pptx] Automizer failed; falling back to ZIP merger", err);
+    }
+  }
+
   try {
     const JSZip = (await import("jszip")).default;
 
@@ -164,7 +598,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let mediaCounter  = 0;
 
     let maxRelNum    = allPresRels.reduce((m, r) => Math.max(m, Number(r.id.replace(/\D/g, "")) || 0), 0);
-    let nextSldId    = Math.max(255, ...[...presXml.matchAll(/\bid="(\d+)"/g)].map((m) => Number(m[1]))) + 1;
+    let nextSldId    = Math.max(255, ...[...presXml.matchAll(/<p:sldId\b[^>]*\bid="(\d+)"/g)].map((m) => Number(m[1]))) + 1;
     let nextMasterId = Math.max(2147483647, ...[...presXml.matchAll(/<p:sldMasterId\b[^>]*\bid="(\d+)"/g)].map((m) => Number(m[1]))) + 1;
 
     // ── Caches ────────────────────────────────────────────────────────────────
@@ -222,27 +656,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       const newRels: Rel[] = [];
       const idMap = new Map<string, string>();
+      const dropped = new Set<string>();
       let c = 1;
 
       for (const rel of srcRels) {
-        const nid = `rId${c++}`;
-        idMap.set(rel.id, nid);
-
         if (rel.type.endsWith("/slideMaster")) {
-          // Point back to our new master
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           newRels.push({ id: nid, type: rel.type, target: `../slideMasters/slideMaster${newMasterNum}.xml` });
         } else if (rel.mode === "External") {
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           newRels.push({ ...rel, id: nid });
         } else if (rel.type.includes("/image") || rel.type.includes("/media")) {
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           const srcMedia = resolvePptx(srcLayoutPath, rel.target);
           const dstMedia = await copyMedia(srcZip, srcMedia, fileKey);
           newRels.push({ id: nid, type: rel.type, target: mediaRelTarget(dstMedia) });
         } else {
-          newRels.push({ ...rel, id: nid });
+          // Drop charts, diagrams, OLE objects, tags, etc. — we don't copy their files,
+          // so keeping the rel produces a broken pointer (PPT repair error).
+          dropped.add(rel.id);
         }
       }
 
-      dst.file(dstPath, applyIdMap(srcXml, idMap));
+      dst.file(dstPath, dropRefs(applyIdMap(srcXml, idMap), dropped));
       dst.file(dstRelPath, buildRelsXml(newRels));
       ctPending.push({ partName: `/${dstPath}`, contentType: "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml" });
 
@@ -270,42 +709,47 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       const newRels: Rel[] = [];
       const idMap = new Map<string, string>();
+      const dropped = new Set<string>();
       let c = 1;
 
       for (const rel of srcRels) {
-        const nid = `rId${c++}`;
-        idMap.set(rel.id, nid);
-
         if (rel.type.endsWith("/slideLayout")) {
-          // Copy this layout (pointing to our new master)
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           const srcLayoutPath = resolvePptx(srcMasterPath, rel.target);
           const newLayoutNum  = await copyLayout(srcZip, srcLayoutPath, fileKey, newMasterNum);
           layoutNumByPath.set(srcLayoutPath, newLayoutNum);
           newRels.push({ id: nid, type: rel.type, target: `../slideLayouts/slideLayout${newLayoutNum}.xml` });
         } else if (rel.type.endsWith("/theme")) {
-          // Copy theme file
           const srcThemePath = resolvePptx(srcMasterPath, rel.target);
           const themeXml     = await srcZip.files[srcThemePath]?.async("text");
           if (themeXml) {
+            const nid = `rId${c++}`;
+            idMap.set(rel.id, nid);
             const themeDst = `ppt/theme/themeExt${newMasterNum}.xml`;
             dst.file(themeDst, themeXml);
             ctPending.push({ partName: `/${themeDst}`, contentType: "application/vnd.openxmlformats-officedocument.drawingml.theme+xml" });
             newRels.push({ id: nid, type: rel.type, target: `../theme/themeExt${newMasterNum}.xml` });
           } else {
-            newRels.push({ ...rel, id: nid });
+            dropped.add(rel.id);
           }
         } else if (rel.mode === "External") {
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           newRels.push({ ...rel, id: nid });
         } else if (rel.type.includes("/image") || rel.type.includes("/media")) {
+          const nid = `rId${c++}`;
+          idMap.set(rel.id, nid);
           const srcMedia = resolvePptx(srcMasterPath, rel.target);
           const dstMedia = await copyMedia(srcZip, srcMedia, fileKey);
           newRels.push({ id: nid, type: rel.type, target: mediaRelTarget(dstMedia) });
         } else {
-          newRels.push({ ...rel, id: nid });
+          // Drop unknown rel types (charts/diagrams/OLE/tags) instead of leaving broken pointers.
+          dropped.add(rel.id);
         }
       }
 
-      dst.file(dstPath, applyIdMap(srcXml, idMap));
+      dst.file(dstPath, dropRefs(applyIdMap(srcXml, idMap), dropped));
       dst.file(dstRelPath, buildRelsXml(newRels));
       ctPending.push({ partName: `/${dstPath}`, contentType: "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml" });
 
@@ -367,28 +811,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // Rewrite slide rels
         const newSlideRels: Rel[] = [];
         const idMap = new Map<string, string>();
+        const dropped = new Set<string>();
         let c = 1;
 
         for (const rel of srcSlideRels) {
-          const nid = `rId${c++}`;
-          idMap.set(rel.id, nid);
-
           if (rel.type.endsWith("/slideLayout")) {
+            const nid = `rId${c++}`;
+            idMap.set(rel.id, nid);
             newSlideRels.push({ id: nid, type: rel.type, target: layoutTarget });
           } else if (rel.mode === "External") {
+            const nid = `rId${c++}`;
+            idMap.set(rel.id, nid);
             newSlideRels.push({ ...rel, id: nid });
           } else if (rel.type.includes("/image") || rel.type.includes("/media")) {
+            const nid = `rId${c++}`;
+            idMap.set(rel.id, nid);
             const srcMedia = resolvePptx(srcSlidePath, rel.target);
             const dstMedia = await copyMedia(srcZip, srcMedia, item.filePath);
             newSlideRels.push({ id: nid, type: rel.type, target: mediaRelTarget(dstMedia) });
           } else {
-            newSlideRels.push({ ...rel, id: nid });
+            // Drop notesSlide, charts, OLE, diagrams, tags — keeping them produces broken pointers.
+            dropped.add(rel.id);
           }
         }
 
         const newSlideNum  = nextSlideNum++;
         const newSlidePath = `ppt/slides/slide${newSlideNum}.xml`;
-        dst.file(newSlidePath, applyIdMap(srcSlideXml, idMap));
+        dst.file(newSlidePath, dropRefs(applyIdMap(srcSlideXml, idMap), dropped));
         dst.file(`ppt/slides/_rels/slide${newSlideNum}.xml.rels`, buildRelsXml(newSlideRels));
         ctPending.push({ partName: `/${newSlidePath}`, contentType: "application/vnd.openxmlformats-officedocument.presentationml.slide+xml" });
 
@@ -424,24 +873,67 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ...newSlidePresRels,
     ]));
 
-    // Update app.xml slide count
-    const appXml = await dst.files["docProps/app.xml"]?.async("text").catch(() => null);
-    if (appXml) dst.file("docProps/app.xml", updateSlideCount(appXml, newSldIdEntries.length));
+    // ── Remove orphan template slides ────────────────────────────────────────
+    // Template slides the user did NOT pick are still in the zip but are no longer
+    // referenced from presentation.xml.rels — those orphans + their Content_Types
+    // overrides cause "PowerPoint found a problem" repair warnings.
+    const orphanSlideTargets = allPresRels
+      .filter((r) => r.type.endsWith("/slide") && !keptSlideRelIds.has(r.id))
+      .map((r) => r.target);
+    const removedPartNames: string[] = [];
+    for (const target of orphanSlideTargets) {
+      const slidePath = target.startsWith("ppt/") ? target
+        : target.startsWith("../") ? `ppt/${target.slice(3)}`
+        : `ppt/${target}`;
+      const slideRelPath = slidePath.replace(/\/([^/]+)$/, "/_rels/$1.rels");
 
-    // Patch Content_Types
+      // Drop notesSlide referenced from this orphan slide (and its rels) too
+      const orphanRelsXml = await dst.files[slideRelPath]?.async("text").catch(() => null);
+      if (orphanRelsXml) {
+        for (const rel of parseRels(orphanRelsXml)) {
+          if (!rel.type.endsWith("/notesSlide")) continue;
+          const notesPath = resolvePptx(slidePath, rel.target);
+          const notesRelPath = notesPath.replace(/\/([^/]+)$/, "/_rels/$1.rels");
+          if (dst.files[notesPath]) { dst.remove(notesPath); removedPartNames.push(`/${notesPath}`); }
+          if (dst.files[notesRelPath]) dst.remove(notesRelPath);
+        }
+      }
+
+      if (dst.files[slidePath])   { dst.remove(slidePath);   removedPartNames.push(`/${slidePath}`); }
+      if (dst.files[slideRelPath]) dst.remove(slideRelPath);
+    }
+
+    // Update app.xml: rebuild slide count + titles list to match the new deck
+    const appXml = await dst.files["docProps/app.xml"]?.async("text").catch(() => null);
+    if (appXml) {
+      const titles = newSldIdEntries.map((_, i) => `Slide ${i + 1}`);
+      dst.file("docProps/app.xml", rebuildAppXml(updateSlideCount(appXml, titles.length), titles));
+    }
+
+    // Patch Content_Types — add new overrides AND drop overrides for removed orphan parts
     await patchContentTypes(dst, ctPending);
+    if (removedPartNames.length > 0) {
+      const ctPath = "[Content_Types].xml";
+      let ctXml = await dst.files[ctPath]?.async("text") ?? "";
+      for (const part of removedPartNames) {
+        const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // Match the whole self-closing Override tag. Don't use [^/] — ContentType values contain /.
+        ctXml = ctXml.replace(new RegExp(`<Override\\s[^>]*\\bPartName="${escaped}"[^>]*\\/>\\s*`, "g"), "");
+      }
+      dst.file(ctPath, ctXml);
+    }
 
     // ── Output ────────────────────────────────────────────────────────────────
     const output = await dst.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
     const fileTitle = title?.trim() || basename(templatePath).replace(/\.pptx$/i, "");
+    // Template-wins canvas size
+    const targetSize = (await readPptxSlideSize(templatePath))
+      ?? (await readPptxSlideSize(slides[0]?.filePath ?? ""));
+    const normalizedOutput = targetSize
+      ? await normalizeComposedOutput(output, slides, targetSize)
+      : output;
 
-    return new NextResponse(output as unknown as BodyInit, {
-      headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "Content-Disposition": `attachment; filename="${escapeFileName(fileTitle)}-composed.pptx"`,
-        "Content-Length": String(output.length),
-      },
-    });
+    return pptxResponse(normalizedOutput, `${escapeFileName(fileTitle)}-composed.pptx`, "zip");
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

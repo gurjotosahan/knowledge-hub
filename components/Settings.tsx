@@ -4,6 +4,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import type { AppConfig, AIProvider, SourceType } from "@/types";
 import { RESEARCH_SECTIONS, RESEARCH_SECTIONS_STORAGE_KEY } from "@/types/research";
 import type { ResearchSectionDef } from "@/types/research";
+import {
+  RFP_ANALYSIS_SECTIONS,
+  RFP_RECOMMENDATION_AREAS,
+  RFP_RECOMMENDATION_AREAS_STORAGE_KEY,
+  RFP_SECTIONS_STORAGE_KEY,
+} from "@/types/rfp";
+import type { RfpAnalysisSectionDef, RfpRecommendationAreaDef } from "@/types/rfp";
 import OneDrivePicker from "./OneDrivePicker";
 
 interface SettingsProps {
@@ -15,10 +22,14 @@ interface SettingsProps {
 interface ModelEntry { id: string; name: string }
 interface IndexStatus {
   exists: boolean;
+  needsRebuild?: boolean;
+  message?: string;
   indexedAt?: string;
   chunks?: number;
   files?: number;
   embedModel?: string;
+  missingFiles?: number;
+  missingFileNames?: string[];
 }
 
 function loadResearchSections(): ResearchSectionDef[] {
@@ -33,12 +44,63 @@ function loadResearchSections(): ResearchSectionDef[] {
       return {
         ...defaults,
         ...section,
-        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2025",
+        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2026 2025",
         prompt: section.prompt || defaults?.prompt || "Describe the output this research component should produce.",
       };
     });
   } catch {
     return RESEARCH_SECTIONS;
+  }
+}
+
+function loadRfpSections(): RfpAnalysisSectionDef[] {
+  if (typeof window === "undefined") return RFP_ANALYSIS_SECTIONS;
+  try {
+    const raw = localStorage.getItem(RFP_SECTIONS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as RfpAnalysisSectionDef[] : null;
+    if (!Array.isArray(parsed) || !parsed.length) return RFP_ANALYSIS_SECTIONS;
+    const defaultsById = new Map(RFP_ANALYSIS_SECTIONS.map((section) => [section.id, section]));
+    return parsed.map((section) => {
+      const defaults = defaultsById.get(section.id);
+      return {
+        ...defaults,
+        ...section,
+        name: section.name || defaults?.name || "RFP Analysis Area",
+        description: section.description || defaults?.description || "Describe what this section should analyze",
+        query: section.query || defaults?.query || "requirements scope risk evaluation",
+        categories: Array.isArray(section.categories) && section.categories.length ? section.categories : defaults?.categories || ["Project Overview"],
+        prompt: section.prompt || defaults?.prompt || "Describe the output this RFP analysis section should produce.",
+      };
+    });
+  } catch {
+    return RFP_ANALYSIS_SECTIONS;
+  }
+}
+
+function loadRfpRecommendationAreas(): RfpRecommendationAreaDef[] {
+  if (typeof window === "undefined") return RFP_RECOMMENDATION_AREAS;
+  try {
+    const raw = localStorage.getItem(RFP_RECOMMENDATION_AREAS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as RfpRecommendationAreaDef[] : null;
+    if (!Array.isArray(parsed) || !parsed.length) return RFP_RECOMMENDATION_AREAS;
+    const defaultsById = new Map(RFP_RECOMMENDATION_AREAS.map((area) => [area.id, area]));
+    return parsed.map((area) => {
+      const defaults = defaultsById.get(area.id);
+      return {
+        ...defaults,
+        ...area,
+        name: area.name || defaults?.name || "Recommended Content",
+        description: area.description || defaults?.description || "Reusable internal content",
+        queryTemplate: area.queryTemplate || defaults?.queryTemplate || "{{profile}}",
+        desiredAssetTypes: Array.isArray(area.desiredAssetTypes) && area.desiredAssetTypes.length
+          ? area.desiredAssetTypes
+          : defaults?.desiredAssetTypes || ["pdf", "pptx", "docx"],
+        prompt: area.prompt || defaults?.prompt || "Find source-backed reusable content.",
+        enabled: area.enabled !== false,
+      };
+    });
+  } catch {
+    return RFP_RECOMMENDATION_AREAS;
   }
 }
 
@@ -58,6 +120,10 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
   const logRef = useRef<HTMLDivElement>(null);
   const [researchSections, setResearchSections] = useState<ResearchSectionDef[]>(() => loadResearchSections());
   const [activeResearchSectionId, setActiveResearchSectionId] = useState<string>(() => loadResearchSections()[0]?.id ?? "");
+  const [rfpSections, setRfpSections] = useState<RfpAnalysisSectionDef[]>(() => loadRfpSections());
+  const [activeRfpSectionId, setActiveRfpSectionId] = useState<string>(() => loadRfpSections()[0]?.id ?? "");
+  const [recommendationAreas, setRecommendationAreas] = useState<RfpRecommendationAreaDef[]>(() => loadRfpRecommendationAreas());
+  const [activeRecommendationAreaId, setActiveRecommendationAreaId] = useState<string>(() => loadRfpRecommendationAreas()[0]?.id ?? "");
 
   const set = <K extends keyof AppConfig>(key: K, val: AppConfig[K]) =>
     setLocal((prev) => ({ ...prev, [key]: val }));
@@ -111,6 +177,14 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
         embeddingProvider: local.embeddingProvider,
         ollamaBaseUrl:     local.ollamaBaseUrl,
         embedModel:        local.ollamaEmbedModel || "bge-large",
+        generateSlidePreviews: local.generateSlidePreviews,
+        enableAssetLlmEnrichment: local.enableAssetLlmEnrichment,
+        aiProvider: local.aiProvider,
+        ollamaModel: local.ollamaModel,
+        openrouterApiKey: local.openrouterApiKey,
+        openrouterModel: local.openrouterModel,
+        geminiApiKey: local.geminiApiKey,
+        geminiModel: local.geminiModel,
       };
 
       if (local.sourceType === "sharepoint") {
@@ -122,6 +196,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
           clientId:     local.graphClientId,
           siteUrl:      local.graphSiteUrl,
           ...embedPayload,
+          generateSlidePreviews: false,
         };
       } else {
         url = "/api/local/index";
@@ -179,7 +254,11 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
 
   const handleSave = () => {
     localStorage.setItem(RESEARCH_SECTIONS_STORAGE_KEY, JSON.stringify(researchSections));
+    localStorage.setItem(RFP_SECTIONS_STORAGE_KEY, JSON.stringify(rfpSections));
+    localStorage.setItem(RFP_RECOMMENDATION_AREAS_STORAGE_KEY, JSON.stringify(recommendationAreas));
     window.dispatchEvent(new Event("research-sections-updated"));
+    window.dispatchEvent(new Event("rfp-sections-updated"));
+    window.dispatchEvent(new Event("rfp-recommendation-areas-updated"));
     onSave(local);
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
@@ -196,7 +275,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
       title: "New Research Component",
       emoji: "📌",
       description: "Describe what this component should research",
-      searchQueryTemplate: "{{client}} research topic 2025",
+      searchQueryTemplate: "{{client}} research topic 2026 2025",
       prompt: "Describe the output this research component should produce. Include the structure, facts to prioritize, and how to connect insights to Apexon opportunities.",
     };
     setResearchSections((prev) => [...prev, section]);
@@ -226,6 +305,93 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
   const resetResearchSections = () => {
     setResearchSections(RESEARCH_SECTIONS);
     setActiveResearchSectionId(RESEARCH_SECTIONS[0]?.id ?? "");
+  };
+
+  const updateRfpSection = (id: string, patch: Partial<RfpAnalysisSectionDef>) => {
+    setRfpSections((prev) => prev.map((section) => section.id === id ? { ...section, ...patch } : section));
+  };
+
+  const addRfpSection = () => {
+    const id = `custom-rfp-${Date.now()}`;
+    const section: RfpAnalysisSectionDef = {
+      id,
+      name: "New RFP Intelligence Block",
+      description: "Describe what this RFP block should analyze",
+      query: "requirements scope risk evaluation",
+      categories: ["Project Overview"],
+      prompt: "Describe the output this RFP analysis block should produce. Include expected structure, evidence requirements, and proposal-team implications.",
+    };
+    setRfpSections((prev) => [...prev, section]);
+    setActiveRfpSectionId(id);
+  };
+
+  const deleteRfpSection = (id: string) => {
+    setRfpSections((prev) => {
+      const next = prev.filter((section) => section.id !== id);
+      if (activeRfpSectionId === id) setActiveRfpSectionId(next[0]?.id ?? "");
+      return next;
+    });
+  };
+
+  const moveRfpSection = (id: string, direction: -1 | 1) => {
+    setRfpSections((prev) => {
+      const index = prev.findIndex((section) => section.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      next.splice(nextIndex, 0, item);
+      return next;
+    });
+  };
+
+  const resetRfpSections = () => {
+    setRfpSections(RFP_ANALYSIS_SECTIONS);
+    setActiveRfpSectionId(RFP_ANALYSIS_SECTIONS[0]?.id ?? "");
+  };
+
+  const updateRecommendationArea = (id: string, patch: Partial<RfpRecommendationAreaDef>) => {
+    setRecommendationAreas((prev) => prev.map((area) => area.id === id ? { ...area, ...patch } : area));
+  };
+
+  const addRecommendationArea = () => {
+    const id = `custom-recommendation-${Date.now()}`;
+    const area: RfpRecommendationAreaDef = {
+      id,
+      name: "New Recommendation Area",
+      description: "Describe which internal content this area should find",
+      queryTemplate: "{{profile}} reusable proposal content",
+      desiredAssetTypes: ["pdf", "pptx", "docx"],
+      prompt: "Find source-backed internal content that can support this RFP response area.",
+      enabled: true,
+    };
+    setRecommendationAreas((prev) => [...prev, area]);
+    setActiveRecommendationAreaId(id);
+  };
+
+  const deleteRecommendationArea = (id: string) => {
+    setRecommendationAreas((prev) => {
+      const next = prev.filter((area) => area.id !== id);
+      if (activeRecommendationAreaId === id) setActiveRecommendationAreaId(next[0]?.id ?? "");
+      return next;
+    });
+  };
+
+  const moveRecommendationArea = (id: string, direction: -1 | 1) => {
+    setRecommendationAreas((prev) => {
+      const index = prev.findIndex((area) => area.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      next.splice(nextIndex, 0, item);
+      return next;
+    });
+  };
+
+  const resetRecommendationAreas = () => {
+    setRecommendationAreas(RFP_RECOMMENDATION_AREAS);
+    setActiveRecommendationAreaId(RFP_RECOMMENDATION_AREAS[0]?.id ?? "");
   };
 
   const sourceTab = (s: SourceType, label: string) => (
@@ -266,6 +432,10 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
 
   const activeResearchSection =
     researchSections.find((section) => section.id === activeResearchSectionId) ?? researchSections[0];
+  const activeRfpSection =
+    rfpSections.find((section) => section.id === activeRfpSectionId) ?? rfpSections[0];
+  const activeRecommendationArea =
+    recommendationAreas.find((area) => area.id === activeRecommendationAreaId) ?? recommendationAreas[0];
 
   return (
     <>
@@ -338,6 +508,13 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                 embeddingProvider={local.embeddingProvider}
                 ollamaBaseUrl={local.ollamaBaseUrl}
                 embedModel={local.ollamaEmbedModel || "bge-large"}
+                enableAssetLlmEnrichment={local.enableAssetLlmEnrichment}
+                aiProvider={local.aiProvider}
+                ollamaModel={local.ollamaModel}
+                openrouterApiKey={local.openrouterApiKey}
+                openrouterModel={local.openrouterModel}
+                geminiApiKey={local.geminiApiKey}
+                geminiModel={local.geminiModel}
                 onIndexed={() => fetchIndexStatus("onedrive:me")}
               />
             ) : (
@@ -444,16 +621,69 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
               </div>
             )}
 
+            <div className="mb-3 flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+              <div>
+                <p className="text-xs font-semibold text-slate-700">Pre-render slide previews</p>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  During local folder indexing, use LibreOffice once per PPTX and cache previews for faster Slide Search.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => set("generateSlidePreviews", !local.generateSlidePreviews)}
+                disabled={local.sourceType !== "local"}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                  local.generateSlidePreviews ? "bg-sky-600" : "bg-slate-300"
+                } disabled:cursor-not-allowed disabled:opacity-50`}
+                aria-pressed={local.generateSlidePreviews}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                  local.generateSlidePreviews ? "translate-x-6" : "translate-x-1"
+                }`} />
+              </button>
+            </div>
+
+            <div className="mb-3 flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+              <div>
+                <p className="text-xs font-semibold text-slate-700">LLM asset intelligence</p>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  During indexing, use the selected chat model to classify reusable assets. Rule-based indexing remains as fallback.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => set("enableAssetLlmEnrichment", !local.enableAssetLlmEnrichment)}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                  local.enableAssetLlmEnrichment ? "bg-sky-600" : "bg-slate-300"
+                }`}
+                aria-pressed={local.enableAssetLlmEnrichment}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                  local.enableAssetLlmEnrichment ? "translate-x-6" : "translate-x-1"
+                }`} />
+              </button>
+            </div>
+
             {indexStatus && (
               <div className={`mb-3 flex items-start gap-2 px-3 py-2.5 rounded-lg border text-xs ${
-                indexStatus.exists ? "bg-emerald-50 border-emerald-100 text-emerald-700" : "bg-amber-50 border-amber-100 text-amber-700"
+                indexStatus.exists && !indexStatus.missingFiles ? "bg-emerald-50 border-emerald-100 text-emerald-700" : "bg-amber-50 border-amber-100 text-amber-700"
               }`}>
                 {indexStatus.exists ? (
                   <><svg className="w-3.5 h-3.5 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm3.707-9.293a1 1 0 0 0-1.414-1.414L9 10.586 7.707 9.293a1 1 0 0 0-1.414 1.414l2 2a1 1 0 0 0 1.414 0l4-4z" clipRule="evenodd" /></svg>
-                    <span>{indexStatus.chunks?.toLocaleString()} chunks · {indexStatus.files} files · {indexStatus.embedModel} · {formatDate(indexStatus.indexedAt)}</span></>
+                    <span>
+                      {indexStatus.chunks?.toLocaleString()} chunks · {indexStatus.files} files · {indexStatus.embedModel} · {formatDate(indexStatus.indexedAt)}
+                      {indexStatus.missingFiles ? ` · ${indexStatus.missingFiles} supported file${indexStatus.missingFiles === 1 ? "" : "s"} not indexed` : ""}
+                      {indexStatus.missingFileNames?.length ? ` (${indexStatus.missingFileNames.join(", ")})` : ""}
+                    </span></>
                 ) : (
                   <><svg className="w-3.5 h-3.5 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm-1-8a1 1 0 0 0-1 1v3a1 1 0 0 0 2 0V6a1 1 0 0 0-1-1z" clipRule="evenodd" /></svg>
-                    <span>No index yet — build it to enable AI search.</span></>
+                    <span>
+                      {indexStatus.needsRebuild
+                        ? `Index needs rebuild · ${indexStatus.chunks?.toLocaleString() ?? 0} old chunks · ${indexStatus.files ?? 0} files`
+                        : "No index yet — build it to enable AI search."}
+                      {indexStatus.missingFiles ? ` · ${indexStatus.missingFiles} supported file${indexStatus.missingFiles === 1 ? "" : "s"} not indexed` : ""}
+                      {indexStatus.missingFileNames?.length ? ` (${indexStatus.missingFileNames.join(", ")})` : ""}
+                    </span></>
                 )}
               </div>
             )}
@@ -705,7 +935,7 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
                     type="text"
                     value={activeResearchSection.searchQueryTemplate}
                     onChange={(e) => updateResearchSection(activeResearchSection.id, { searchQueryTemplate: e.target.value })}
-                    placeholder="{{client}} cloud modernization AI 2025"
+                    placeholder="{{client}} cloud modernization AI 2026 2025"
                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono"
                   />
                   <p className="mt-1 text-[10px] text-slate-400">Use <code className="text-slate-600">{"{{client}}"}</code> where the company name should be inserted.</p>
@@ -741,6 +971,307 @@ export default function Settings({ config, onSave, onClose }: SettingsProps) {
               </div>
             ) : (
               <p className="mt-3 text-xs text-slate-400">No research components configured.</p>
+            )}
+          </section>
+
+          {/* ── Section 6: RFP Analyzer Admin ── */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-slate-100 flex items-center justify-center">
+                  <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414A1 1 0 0 1 19 9.414V19a2 2 0 0 1-2 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-700">RFP Analyzer Admin</h3>
+                  <p className="text-xs text-slate-400">Manage analyzer blocks, retrieval hints, and section prompts</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={addRfpSection}
+                className="px-2.5 py-1.5 rounded-lg bg-sky-600 text-xs font-semibold text-white hover:bg-sky-700"
+              >
+                Add
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 overflow-hidden">
+              <div className="max-h-44 overflow-y-auto divide-y divide-slate-100 bg-white">
+                {rfpSections.map((section, index) => {
+                  const active = section.id === activeRfpSection?.id;
+                  return (
+                    <div key={section.id} className={`flex items-center gap-2 px-3 py-2 transition-colors ${active ? "bg-sky-50" : "hover:bg-slate-50"}`}>
+                      <button type="button" onClick={() => setActiveRfpSectionId(section.id)} className="min-w-0 flex flex-1 items-center gap-2 text-left">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-100 text-[10px] font-semibold text-slate-500">{index + 1}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className={`block truncate text-xs font-semibold ${active ? "text-sky-700" : "text-slate-700"}`}>{section.name}</span>
+                          <span className="block truncate text-[10px] text-slate-400">{section.description}</span>
+                        </span>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => moveRfpSection(section.id, -1)}
+                          disabled={index === 0}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                          title="Move up"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveRfpSection(section.id, 1)}
+                          disabled={index === rfpSections.length - 1}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                          title="Move down"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {activeRfpSection ? (
+              <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Block title</label>
+                  <input
+                    type="text"
+                    value={activeRfpSection.name}
+                    onChange={(e) => updateRfpSection(activeRfpSection.id, { name: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={activeRfpSection.description}
+                    onChange={(e) => updateRfpSection(activeRfpSection.id, { description: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Retrieval query hints</label>
+                  <input
+                    type="text"
+                    value={activeRfpSection.query}
+                    onChange={(e) => updateRfpSection(activeRfpSection.id, { query: e.target.value })}
+                    placeholder="requirements mandatory scope risk pricing"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Categories</label>
+                  <input
+                    type="text"
+                    value={activeRfpSection.categories.join(", ")}
+                    onChange={(e) => updateRfpSection(activeRfpSection.id, { categories: e.target.value.split(",").map(item => item.trim()).filter(Boolean) })}
+                    placeholder="Scope, Technical Requirements, Risks"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <p className="mt-1 text-[10px] text-slate-400">Comma-separated retrieval categories used to find the best RFP chunks for this block.</p>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Section prompt</label>
+                  <textarea
+                    rows={7}
+                    value={activeRfpSection.prompt}
+                    onChange={(e) => updateRfpSection(activeRfpSection.id, { prompt: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 leading-relaxed"
+                  />
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => deleteRfpSection(activeRfpSection.id)}
+                    disabled={rfpSections.length <= 1}
+                    className="flex-1 py-2 rounded-lg border border-red-200 bg-white text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Delete Block
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetRfpSections}
+                    className="flex-1 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                  >
+                    Reset Defaults
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-slate-400">No RFP analyzer blocks configured.</p>
+            )}
+          </section>
+
+          {/* ── Section 7: RFP Recommendation Areas ── */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-slate-100 flex items-center justify-center">
+                  <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428A8 8 0 1 1 8.572 4.572M12 8v4l3 3" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-700">RFP Recommendation Areas</h3>
+                  <p className="text-xs text-slate-400">Manage internal content searches after RFP analysis</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={addRecommendationArea}
+                className="px-2.5 py-1.5 rounded-lg bg-sky-600 text-xs font-semibold text-white hover:bg-sky-700"
+              >
+                Add
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 overflow-hidden">
+              <div className="max-h-44 overflow-y-auto divide-y divide-slate-100 bg-white">
+                {recommendationAreas.map((area, index) => {
+                  const active = area.id === activeRecommendationArea?.id;
+                  return (
+                    <div key={area.id} className={`flex items-center gap-2 px-3 py-2 transition-colors ${active ? "bg-sky-50" : "hover:bg-slate-50"}`}>
+                      <button type="button" onClick={() => setActiveRecommendationAreaId(area.id)} className="min-w-0 flex flex-1 items-center gap-2 text-left">
+                        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-semibold ${area.enabled ? "bg-slate-100 text-slate-500" : "bg-slate-50 text-slate-300"}`}>{index + 1}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className={`block truncate text-xs font-semibold ${active ? "text-sky-700" : "text-slate-700"}`}>{area.name}</span>
+                          <span className="block truncate text-[10px] text-slate-400">{area.enabled ? area.description : "Disabled"}</span>
+                        </span>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => moveRecommendationArea(area.id, -1)}
+                          disabled={index === 0}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30"
+                          title="Move up"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveRecommendationArea(area.id, 1)}
+                          disabled={index === recommendationAreas.length - 1}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-30"
+                          title="Move down"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {activeRecommendationArea ? (
+              <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <label className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-semibold text-slate-700">Enabled</span>
+                    <span className="block text-[10px] text-slate-400">Include this area when finding recommended content</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={activeRecommendationArea.enabled}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { enabled: e.target.checked })}
+                    className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  />
+                </label>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Area title</label>
+                  <input
+                    type="text"
+                    value={activeRecommendationArea.name}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { name: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={activeRecommendationArea.description}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { description: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Retrieval query template</label>
+                  <input
+                    type="text"
+                    value={activeRecommendationArea.queryTemplate}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { queryTemplate: e.target.value })}
+                    placeholder="{{profile}} capability slides"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono"
+                  />
+                  <p className="mt-1 text-[10px] text-slate-400">Use <code className="text-slate-600">{"{{profile}}"}</code> for the extracted RFP opportunity terms.</p>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Desired asset types</label>
+                  <input
+                    type="text"
+                    value={activeRecommendationArea.desiredAssetTypes.join(", ")}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { desiredAssetTypes: e.target.value.split(",").map(item => item.trim().toLowerCase()).filter(Boolean) })}
+                    placeholder="pptx, pdf, docx"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Ranking guidance</label>
+                  <textarea
+                    rows={5}
+                    value={activeRecommendationArea.prompt}
+                    onChange={(e) => updateRecommendationArea(activeRecommendationArea.id, { prompt: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 leading-relaxed"
+                  />
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => deleteRecommendationArea(activeRecommendationArea.id)}
+                    disabled={recommendationAreas.length <= 1}
+                    className="flex-1 py-2 rounded-lg border border-red-200 bg-white text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Delete Area
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetRecommendationAreas}
+                    className="flex-1 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                  >
+                    Reset Defaults
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-slate-400">No recommendation areas configured.</p>
             )}
           </section>
 

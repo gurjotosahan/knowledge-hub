@@ -6,6 +6,11 @@ import { createHash } from "crypto";
 import type { RagChunk } from "./indexer";
 import type { SearchableFileType } from "@/types";
 
+export interface IndexedFile {
+  path: string;
+  mtime: number;
+}
+
 export interface IndexMeta {
   version: number;
   sourceKey: string;
@@ -13,6 +18,7 @@ export interface IndexMeta {
   embedModel: string;
   parentChunks: number;
   files: number;
+  indexedFiles: IndexedFile[];
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
@@ -27,6 +33,13 @@ function metaPath(sourceKey: string): string {
 }
 
 const tableCache = new Map<string, Promise<lancedb.Table>>();
+const CHUNK_COLUMNS = [
+  "id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId",
+  "thumbnailPath", "previewPdfPath", "previewStatus",
+  "documentAssetType", "sectionAssetType", "industries", "serviceLines", "technologies",
+  "reusableFor", "proofStrength", "hasMetrics", "assetSummary",
+  "assetYear", "yearSignals", "yearConfidence",
+];
 
 function chunksTable(sourceKey: string): Promise<lancedb.Table> {
   const dir = dbDir(sourceKey);
@@ -55,13 +68,42 @@ function toRecord(chunk: RagChunk, dim: number): Record<string, unknown> {
     text:       chunk.text,
     level:      chunk.level   ?? "",
     parentId:   chunk.parentId ?? "",
+    thumbnailPath: chunk.thumbnailPath ?? "",
+    previewPdfPath: chunk.previewPdfPath ?? "",
+    previewStatus: chunk.previewStatus ?? "",
+    documentAssetType: chunk.documentAssetType ?? "",
+    sectionAssetType: chunk.sectionAssetType ?? "",
+    industries: JSON.stringify(chunk.industries ?? []),
+    serviceLines: JSON.stringify(chunk.serviceLines ?? []),
+    technologies: JSON.stringify(chunk.technologies ?? []),
+    reusableFor: JSON.stringify(chunk.reusableFor ?? []),
+    proofStrength: chunk.proofStrength ?? "",
+    hasMetrics: Boolean(chunk.hasMetrics),
+    assetSummary: chunk.assetSummary ?? "",
+    assetYear: chunk.assetYear ?? 0,
+    yearSignals: JSON.stringify(chunk.yearSignals ?? []),
+    yearConfidence: chunk.yearConfidence ?? "",
     // Parents have no embedding — zero vector keeps the schema uniform
     vector: new Float32Array(chunk.embedding ?? new Array(dim).fill(0)),
   };
 }
 
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean);
+  if (typeof value !== "string" || !value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)).filter(Boolean) : [];
+  } catch {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+}
+
 function fromRecord(row: Record<string, unknown>): RagChunk {
   const level = row.level as string;
+  const proofStrength = row.proofStrength as string;
+  const yearConfidence = row.yearConfidence as string;
+  const assetYear = Number(row.assetYear);
   return {
     id:         row.id         as string,
     fileName:   row.fileName   as string,
@@ -72,6 +114,27 @@ function fromRecord(row: Record<string, unknown>): RagChunk {
     text:       row.text       as string,
     level:      level === "parent" ? "parent" : level === "child" ? "child" : undefined,
     parentId:   (row.parentId as string) || undefined,
+    thumbnailPath: (row.thumbnailPath as string) || undefined,
+    previewPdfPath: (row.previewPdfPath as string) || undefined,
+    previewStatus: row.previewStatus === "thumbnail" || row.previewStatus === "pdf" || row.previewStatus === "failed"
+      ? row.previewStatus
+      : undefined,
+    documentAssetType: (row.documentAssetType as RagChunk["documentAssetType"]) || undefined,
+    sectionAssetType: (row.sectionAssetType as RagChunk["sectionAssetType"]) || undefined,
+    industries: parseStringArray(row.industries),
+    serviceLines: parseStringArray(row.serviceLines),
+    technologies: parseStringArray(row.technologies),
+    reusableFor: parseStringArray(row.reusableFor),
+    proofStrength: proofStrength === "high" || proofStrength === "medium" || proofStrength === "low" || proofStrength === "none"
+      ? proofStrength
+      : undefined,
+    hasMetrics: Boolean(row.hasMetrics),
+    assetSummary: (row.assetSummary as string) || undefined,
+    assetYear: assetYear > 0 ? assetYear : undefined,
+    yearSignals: parseStringArray(row.yearSignals).map(Number).filter((year) => Number.isFinite(year) && year > 0),
+    yearConfidence: yearConfidence === "high" || yearConfidence === "medium" || yearConfidence === "low"
+      ? yearConfidence
+      : undefined,
   };
 }
 
@@ -106,7 +169,7 @@ export async function writeIndex(
 export async function appendIndex(
   sourceKey: string,
   chunks: RagChunk[],
-  metaPatch: Pick<IndexMeta, "version" | "sourceKey" | "indexedAt" | "embedModel" | "parentChunks" | "files">
+  metaPatch: Pick<IndexMeta, "version" | "sourceKey" | "indexedAt" | "embedModel" | "parentChunks" | "files" | "indexedFiles">
 ): Promise<IndexMeta> {
   const existingMeta = await readMeta(sourceKey);
   if (!existingMeta || existingMeta.version !== metaPatch.version || existingMeta.embedModel !== metaPatch.embedModel) {
@@ -136,11 +199,18 @@ export async function appendIndex(
     await buildFtsIndex(table);
   }
 
+  // Merge indexed files - dedupe by path, prefer new mtime
+  const fileMap = new Map<string, IndexedFile>();
+  for (const f of (existingMeta.indexedFiles ?? [])) fileMap.set(f.path, f);
+  for (const f of (metaPatch.indexedFiles ?? [])) fileMap.set(f.path, f);
+  const mergedFiles = Array.from(fileMap.values());
+
   const nextMeta: IndexMeta = {
     ...existingMeta,
     indexedAt: metaPatch.indexedAt,
     parentChunks: existingMeta.parentChunks + metaPatch.parentChunks,
-    files: existingMeta.files + metaPatch.files,
+    files: mergedFiles.length,
+    indexedFiles: mergedFiles,
   };
   await fs.writeFile(metaPath(sourceKey), JSON.stringify(nextMeta), "utf-8");
   clearRuntimeCaches(sourceKey);
@@ -189,7 +259,7 @@ export async function ftsSearch(
   try {
     const rows = await tbl
       .search(query, "fts")
-      .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
+      .select(CHUNK_COLUMNS)
       .where("level != 'parent'")
       .limit(limit)
       .toArray() as (Record<string, unknown> & { _score?: number })[];
@@ -213,7 +283,7 @@ export async function fetchParentsByIds(
   const rows = await tbl
     .query()
     .where(`level = 'parent' AND id IN (${list})`)
-    .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
+    .select(CHUNK_COLUMNS)
     .toArray() as Record<string, unknown>[];
 
   return rows.map(fromRecord);
@@ -230,7 +300,7 @@ export async function fetchFileParents(
   const rows = await tbl
     .query()
     .where(`filePath = '${escaped}' AND (level = 'parent' OR level = '')`)
-    .select(["id", "fileName", "filePath", "fileType", "page", "chunkIndex", "text", "level", "parentId"])
+    .select(CHUNK_COLUMNS)
     .toArray() as Record<string, unknown>[];
 
   return rows.map(fromRecord);

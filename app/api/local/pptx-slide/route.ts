@@ -4,6 +4,17 @@ import type { PptxSlideData, TextShape, ImageShape, Para, TextRun } from "@/type
 
 // ── XML helpers ───────────────────────────────────────────────────────────────
 
+function decodeXml(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&amp;/g, "&");
+}
+
 function getAttr(xml: string, name: string): string | null {
   return xml.match(new RegExp(`\\b${name}="([^"]*)"`))?.[ 1] ?? null;
 }
@@ -121,7 +132,7 @@ function parseShapes(
         const fontSize = szRaw ? +szRaw / 100 : undefined;
         const colorSf = getBlock(rPr, "solidFill");
         const color   = colorSf ? (parseColor(colorSf) ?? undefined) : undefined;
-        runs.push({ text: t, bold: bold || undefined, italic: italic || undefined, fontSize, color });
+        runs.push({ text: decodeXml(t), bold: bold || undefined, italic: italic || undefined, fontSize, color });
       }
       if (pXml.includes("<a:br")) runs.push({ text: "\n" });
       if (runs.length) paragraphs.push({ runs, align });

@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { AppConfig } from "@/types";
+import type { AppConfig, Source } from "@/types";
+import LocalDocPreview from "@/components/LocalDocPreview";
 import { RESEARCH_SECTIONS, RESEARCH_SECTIONS_STORAGE_KEY } from "@/types/research";
-import type { ResearchSectionDef, SavedResearch, ResearchSectionResult } from "@/types/research";
+import type { ResearchReference, ResearchSectionDef, SavedResearch, ResearchSectionResult } from "@/types/research";
 
-interface Props { config: AppConfig }
+interface Props { config: AppConfig; sourceKey?: string; onExitToHub?: () => void }
 
 type View = "home" | "picker" | "researching" | "report";
 
@@ -40,7 +41,55 @@ function pdfSafeText(text: string): string {
     .trim();
 }
 
-interface ChatMessage { role: "user" | "assistant"; content: string }
+interface ChatMessage { role: "user" | "assistant"; content: string; references?: ResearchReference[] }
+
+const RECOMMENDED_SECTION_IDS = ["snapshot", "business", "strategy", "challenges"] as const;
+
+const RESEARCH_AREA_GROUPS: { label: string; sectionIds: string[] }[] = [
+  { label: "Company Context",      sectionIds: ["snapshot", "business", "market"] },
+  { label: "Strategy & Priorities", sectionIds: ["strategy", "tech", "challenges"] },
+  { label: "Sales Intelligence",   sectionIds: ["buying", "intent", "vendors"] },
+  { label: "Apexon Plays",         sectionIds: ["hypothesis", "engagement", "apexon_fit"] },
+];
+
+const COMPANY_EXAMPLES = ["AstraZeneca", "Kaiser Permanente", "JPMorgan Chase"];
+
+function defaultSelectedIds(sections: ResearchSectionDef[]): Set<string> {
+  const ids = new Set(sections.map((s) => s.id));
+  const recommended = RECOMMENDED_SECTION_IDS.filter((id) => ids.has(id));
+  return new Set(recommended.length ? recommended : sections.map((s) => s.id));
+}
+
+function groupResearchSections(sections: ResearchSectionDef[]): { label: string; items: ResearchSectionDef[] }[] {
+  const byId = new Map(sections.map((s) => [s.id, s]));
+  const claimed = new Set<string>();
+  const groups = RESEARCH_AREA_GROUPS.map((g) => {
+    const items: ResearchSectionDef[] = [];
+    for (const id of g.sectionIds) {
+      const section = byId.get(id);
+      if (section) { items.push(section); claimed.add(id); }
+    }
+    return { label: g.label, items };
+  }).filter((g) => g.items.length);
+
+  const leftover = sections.filter((s) => !claimed.has(s.id));
+  if (leftover.length) groups.push({ label: "Other", items: leftover });
+  return groups;
+}
+
+function sourceFromReference(ref: ResearchReference): Source {
+  return {
+    id: ref.id,
+    docId: ref.filePath,
+    title: ref.title,
+    slide: ref.page,
+    serviceLine: "BFSI",
+    filePath: ref.filePath,
+    fileType: ref.fileType,
+    excerpt: ref.excerpt,
+    sourceType: "rag",
+  };
+}
 
 function loadResearchSections(): ResearchSectionDef[] {
   if (typeof window === "undefined") return RESEARCH_SECTIONS;
@@ -54,7 +103,7 @@ function loadResearchSections(): ResearchSectionDef[] {
       return {
         ...defaults,
         ...section,
-        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2025",
+        searchQueryTemplate: section.searchQueryTemplate || defaults?.searchQueryTemplate || "{{client}} research topic 2026 2025",
         prompt: section.prompt || defaults?.prompt || "Describe the output this research component should produce.",
       };
     });
@@ -63,18 +112,19 @@ function loadResearchSections(): ResearchSectionDef[] {
   }
 }
 
-export default function ClientResearch({ config }: Props) {
+export default function ClientResearch({ config, sourceKey, onExitToHub }: Props) {
   const [view,          setView]          = useState<View>("home");
   const [clientName,    setClientName]    = useState("");
   const [followUpQuery, setFollowUpQuery] = useState("");
   const [researchSections, setResearchSections] = useState<ResearchSectionDef[]>(() => loadResearchSections());
-  const [selected,      setSelected]      = useState<Set<string>>(() => new Set(loadResearchSections().map((s) => s.id)));
+  const [selected,      setSelected]      = useState<Set<string>>(() => defaultSelectedIds(loadResearchSections()));
   const [sections,      setSections]      = useState<ResearchSectionResult[]>([]);
   const [progress,      setProgress]      = useState<string[]>([]);
   const [error,         setError]         = useState("");
   const [researchId,    setResearchId]    = useState<string | null>(null);
   const [saved,         setSaved]         = useState<SavedResearch[]>([]);
   const [pdfLoading,    setPdfLoading]    = useState(false);
+  const [selectedSource, setSelectedSource] = useState<Source | null>(null);
 
   // Follow-up chat on completed research
   const [chatHistory,   setChatHistory]   = useState<ChatMessage[]>([]);
@@ -110,7 +160,7 @@ export default function ClientResearch({ config }: Props) {
     const validIds = new Set(researchSections.map((s) => s.id));
     setSelected((prev) => {
       const kept = [...prev].filter((id) => validIds.has(id));
-      return new Set(kept.length ? kept : researchSections.map((s) => s.id));
+      return new Set(kept.length ? kept : [...defaultSelectedIds(researchSections)]);
     });
   }, [researchSections]);
 
@@ -143,11 +193,14 @@ export default function ClientResearch({ config }: Props) {
           selectedSections: Array.from(selected),
           researchSections,
           followUpQuery:    followUpQuery.trim() || undefined,
+          sourceKey,
           aiProvider:       config.aiProvider,
           ollamaBaseUrl:    config.ollamaBaseUrl,
           ollamaModel:      config.ollamaModel,
+          ollamaEmbedModel: config.ollamaEmbedModel,
           openrouterModel:  config.openrouterModel,
           geminiModel:      config.geminiModel,
+          embeddingProvider: config.embeddingProvider,
         }),
       });
       if (!res.ok || !res.body) throw new Error(`Server error ${res.status}`);
@@ -165,7 +218,27 @@ export default function ClientResearch({ config }: Props) {
           try {
             const evt = JSON.parse(line.slice(6));
             if (evt.type === "progress") setProgress((p) => [...p, evt.msg]);
-            if (evt.type === "section")  setSections((p) => [...p, evt.section]);
+            if (evt.type === "section-start") {
+              setSections((prev) => {
+                const exists = prev.some((section) => section.id === evt.section.id);
+                return exists ? prev : [...prev, evt.section];
+              });
+            }
+            if (evt.type === "section-delta") {
+              setSections((prev) => prev.map((section) =>
+                section.id === evt.sectionId
+                  ? { ...section, content: `${section.content}${evt.delta}` }
+                  : section
+              ));
+            }
+            if (evt.type === "section") {
+              setSections((prev) => {
+                const exists = prev.some((section) => section.id === evt.section.id);
+                return exists
+                  ? prev.map((section) => section.id === evt.section.id ? evt.section : section)
+                  : [...prev, evt.section];
+              });
+            }
             if (evt.type === "done")     { setResearchId(evt.researchId); setView("report"); }
             if (evt.type === "error")    setError(evt.error);
           } catch {}
@@ -278,7 +351,7 @@ export default function ClientResearch({ config }: Props) {
     setError("");
     setResearchId(null);
     setChatHistory([]);
-    setSelected(new Set(researchSections.map((s) => s.id)));
+    setSelected(defaultSelectedIds(researchSections));
   };
 
   const askFollowUp = async () => {
@@ -300,16 +373,19 @@ export default function ClientResearch({ config }: Props) {
           sections,
           question:         q,
           history:          chatHistory,
+          sourceKey,
           aiProvider:       config.aiProvider,
           ollamaBaseUrl:    config.ollamaBaseUrl,
           ollamaModel:      config.ollamaModel,
+          ollamaEmbedModel: config.ollamaEmbedModel,
           openrouterModel:  config.openrouterModel,
           geminiModel:      config.geminiModel,
+          embeddingProvider: config.embeddingProvider,
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setChatHistory([...newHistory, { role: "assistant", content: data.answer }]);
+      setChatHistory([...newHistory, { role: "assistant", content: data.answer, references: data.references ?? [] }]);
     } catch (e) {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       if (!aborted) setChatHistory([...newHistory, { role: "assistant", content: `Error: ${String(e)}` }]);
@@ -325,9 +401,24 @@ export default function ClientResearch({ config }: Props) {
 
   // ── Views ──────────────────────────────────────────────────────────────────
 
+  const HubBackLink = onExitToHub ? (
+    <button
+      type="button"
+      onClick={onExitToHub}
+      title="Return to normal document search"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm hover:bg-slate-50 transition-colors"
+    >
+      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+      </svg>
+      Knowledge Hub
+    </button>
+  ) : null;
+
   if (view === "home") {
     return (
       <div className="flex-1 flex flex-col overflow-y-auto px-6 py-6 max-w-3xl mx-auto w-full">
+        {HubBackLink && <div className="mb-4">{HubBackLink}</div>}
         {/* Hero */}
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-slate-800 mb-1">Client Research</h1>
@@ -403,104 +494,199 @@ export default function ClientResearch({ config }: Props) {
   }
 
   if (view === "picker") {
+    const recommendedSet = new Set<string>(RECOMMENDED_SECTION_IDS);
+    const groupedSections = groupResearchSections(researchSections);
+    const selectedCount = selected.size;
+    const canSubmit = clientName.trim().length > 0 && selectedCount > 0;
+
     return (
-      <div className="flex-1 flex flex-col overflow-y-auto px-6 py-6 max-w-3xl mx-auto w-full">
-        <button onClick={resetToHome} className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 mb-5">
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back
-        </button>
+      <div className="flex-1 flex flex-col overflow-hidden w-full bg-slate-50/40">
+        {/* ── Header (fixed) ── */}
+        <div className="shrink-0 px-4 sm:px-6 pt-6 pb-4 max-w-3xl mx-auto w-full">
+          <div className="flex items-center gap-2 mb-4">
+            {HubBackLink}
+            <button onClick={resetToHome} className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              All Research
+            </button>
+          </div>
 
-        <h2 className="text-lg font-bold text-slate-800 mb-1">New Client Research</h2>
-        <p className="text-sm text-slate-500 mb-5">Enter a company name, select research components, and optionally add a specific question.</p>
-
-        {/* Client name */}
-        <div className="mb-5">
-          <label className="block text-xs font-semibold text-slate-500 mb-1.5">Company / Prospect Name</label>
-          <input
-            autoFocus
-            type="text"
-            value={clientName}
-            onChange={(e) => setClientName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && clientName.trim() && document.getElementById("research-btn")?.click()}
-            placeholder="e.g. JPMorgan Chase, Kaiser Permanente, AstraZeneca…"
-            className="w-full px-4 py-2.5 text-sm border border-slate-200 rounded-xl bg-white text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500"
-          />
+          <h2 className="text-xl font-bold text-slate-900 mb-1">Client Research Brief</h2>
+          <p className="text-sm text-slate-500">Generate a structured account research brief for sales, presales, and pursuit planning.</p>
         </div>
 
-        {/* Section selector */}
-        <div className="mb-5">
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-semibold text-slate-500">Research Components</label>
-            <div className="flex gap-3">
-              <button onClick={() => setSelected(new Set(researchSections.map((s) => s.id)))} className="text-xs text-sky-600 hover:text-sky-700">Select all</button>
-              <button onClick={() => setSelected(new Set())} className="text-xs text-slate-400 hover:text-slate-600">Clear</button>
+        {/* ── Scrollable body ── */}
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6">
+          <div className="max-w-3xl mx-auto w-full pb-8 space-y-8">
+
+            {/* Step 1: Company / Prospect */}
+            <section>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-600 text-white text-[10px] font-bold">1</span>
+                <h3 className="text-sm font-semibold text-slate-800">Company / Prospect</h3>
+              </div>
+              <input
+                autoFocus
+                type="text"
+                value={clientName}
+                onChange={(e) => setClientName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && canSubmit && document.getElementById("research-btn")?.click()}
+                placeholder="Enter company or prospect name"
+                className="w-full px-4 py-2.5 text-sm border border-slate-200 rounded-xl bg-white text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+              <p className="mt-1.5 text-xs text-slate-400">Use the official company name for better results.</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <span className="text-[11px] text-slate-400 mr-1 self-center">Try:</span>
+                {COMPANY_EXAMPLES.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => setClientName(name)}
+                    className="text-[11px] px-2.5 py-1 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-sky-300 hover:text-sky-700 transition-colors"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {/* Step 2: Research Areas */}
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-600 text-white text-[10px] font-bold">2</span>
+                  <h3 className="text-sm font-semibold text-slate-800">Research Areas</h3>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setSelected(new Set(researchSections.map((s) => s.id)))} className="text-xs text-sky-600 hover:text-sky-700">Select all areas</button>
+                  <button onClick={() => setSelected(new Set())} className="text-xs text-slate-400 hover:text-slate-600">Clear</button>
+                </div>
+              </div>
+
+              <div className="space-y-5">
+                {groupedSections.map((group) => (
+                  <div key={group.label}>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-2">{group.label}</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {group.items.map((s) => {
+                        const on = selected.has(s.id);
+                        const recommended = recommendedSet.has(s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => toggleSection(s.id)}
+                            aria-pressed={on}
+                            className={`flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all ${
+                              on
+                                ? "border-sky-300 bg-sky-50 shadow-[0_0_0_1px_rgba(14,165,233,0.15)]"
+                                : "border-slate-200 bg-white hover:border-slate-300"
+                            }`}
+                          >
+                            <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${on ? "bg-sky-600 border-sky-600" : "border-slate-300"}`}>
+                              {on && <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
+                            </div>
+                            <span className="text-base shrink-0 leading-none">{s.emoji}</span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <p className={`text-xs font-semibold truncate ${on ? "text-sky-700" : "text-slate-700"}`}>{s.title}</p>
+                                {recommended && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-100 font-semibold uppercase tracking-wide shrink-0">Rec</span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-400 truncate">{s.description}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Step 3: Specific Focus Area */}
+            <section>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-600 text-white text-[10px] font-bold">3</span>
+                <h3 className="text-sm font-semibold text-slate-800">Specific Focus Area <span className="font-normal text-slate-400">(optional)</span></h3>
+              </div>
+              <input
+                type="text"
+                value={followUpQuery}
+                onChange={(e) => setFollowUpQuery(e.target.value)}
+                placeholder="e.g. Known data platform issues, AI strategy, cloud migration, regulatory pressure…"
+                className="w-full px-4 py-2.5 text-sm border border-slate-200 rounded-xl bg-white text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+              <p className="mt-1.5 text-xs text-slate-400">Optional: add a focused question to tailor the research brief.</p>
+            </section>
+          </div>
+        </div>
+
+        {/* ── Sticky footer ── */}
+        <div className="shrink-0 border-t border-slate-200 bg-white px-4 sm:px-6 py-3">
+          <div className="max-w-3xl mx-auto w-full flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-slate-700">{selectedCount} {selectedCount === 1 ? "area" : "areas"} selected</p>
+              <p className="text-[11px] text-slate-400 truncate">Generates a structured brief with company context, priorities, risks, opportunities, and sales angles.</p>
             </div>
-          </div>
-          <div className="grid grid-cols-1 gap-2">
-            {researchSections.map((s) => {
-              const on = selected.has(s.id);
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => toggleSection(s.id)}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition-all ${
-                    on ? "border-sky-200 bg-sky-50" : "border-slate-200 bg-white hover:border-slate-300"
-                  }`}
-                >
-                  <div className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${on ? "bg-sky-600 border-sky-600" : "border-slate-300"}`}>
-                    {on && <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                  </div>
-                  <span className="text-lg shrink-0">{s.emoji}</span>
-                  <div className="min-w-0">
-                    <p className={`text-xs font-semibold ${on ? "text-sky-700" : "text-slate-700"}`}>{s.title}</p>
-                    <p className="text-[10px] text-slate-400 truncate">{s.description}</p>
-                  </div>
-                </button>
-              );
-            })}
+            <button
+              id="research-btn"
+              onClick={startResearch}
+              disabled={!canSubmit}
+              className={`w-full sm:w-auto px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${
+                canSubmit
+                  ? "bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
+                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
+              }`}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              Generate Research Brief
+            </button>
           </div>
         </div>
-
-        {/* Optional specific query */}
-        <div className="mb-6">
-          <label className="block text-xs font-semibold text-slate-500 mb-1.5">Specific Question <span className="font-normal text-slate-400">(optional)</span></label>
-          <input
-            type="text"
-            value={followUpQuery}
-            onChange={(e) => setFollowUpQuery(e.target.value)}
-            placeholder="e.g. Do they have any known issues with their data platform?"
-            className="w-full px-4 py-2.5 text-sm border border-slate-200 rounded-xl bg-white text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500"
-          />
-        </div>
-
-        <button
-          id="research-btn"
-          onClick={startResearch}
-          disabled={!clientName.trim() || selected.size === 0}
-          className="w-full py-3 rounded-xl bg-sky-600 text-white text-sm font-semibold hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          Research {clientName.trim() ? `"${clientName.trim()}"` : ""}
-        </button>
       </div>
     );
   }
 
   if (view === "researching") {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 max-w-3xl mx-auto w-full">
+      <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 max-w-3xl mx-auto w-full overflow-y-auto">
         <div className="w-12 h-12 rounded-full border-2 border-sky-200 border-t-sky-500 animate-spin mb-4" />
         <h2 className="text-base font-semibold text-slate-700 mb-1">Researching {clientName}…</h2>
-        <p className="text-xs text-slate-400 mb-4">This may take 30–60 seconds</p>
-        <div ref={progressRef} className="w-full max-w-sm max-h-40 overflow-y-auto rounded-xl bg-slate-900 px-4 py-3 font-mono text-xs text-slate-300 space-y-1">
+        <p className="text-xs text-slate-400 mb-4">
+          {sections.length ? "Writing the report live" : "Gathering context and sources"}
+        </p>
+        <div ref={progressRef} className="w-full max-w-xl max-h-36 overflow-y-auto rounded-xl bg-slate-900 px-4 py-3 font-mono text-xs text-slate-300 space-y-1">
           {progress.map((msg, i) => <div key={i} className="text-sky-300">{msg}</div>)}
-          {sections.map((s) => <div key={s.id} className="text-emerald-400">✓ {s.title}</div>)}
+          {sections.map((s) => <div key={s.id} className="text-emerald-400">Writing {s.title}</div>)}
           <div className="text-sky-400 animate-pulse">Working…</div>
         </div>
+        {sections.length > 0 && (
+          <div className="mt-6 w-full space-y-4">
+            {sections.map((section) => (
+              <div key={section.id} className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+                <div className="flex items-center gap-2.5 px-4 py-3 bg-slate-50 border-b border-slate-100">
+                  <span className="text-lg">{section.emoji}</span>
+                  <h3 className="text-sm font-bold text-slate-800">{section.title}</h3>
+                  {!section.content && <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide text-sky-500">Starting</span>}
+                </div>
+                <div className="px-4 py-3 text-sm space-y-1 min-h-12">
+                  {section.content
+                    ? renderMarkdown(section.content)
+                    : <p className="text-slate-400 animate-pulse">Preparing section…</p>}
+                  {section.content && (
+                    <span className="inline-block ml-0.5 h-4 w-1.5 translate-y-0.5 rounded-sm bg-sky-500 animate-pulse" />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {error && <p className="mt-4 text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</p>}
       </div>
     );
@@ -513,8 +699,37 @@ export default function ClientResearch({ config }: Props) {
     createdAt: new Date().toISOString(),
   };
 
+  const renderReferenceLinks = (references?: ResearchReference[]) => {
+    if (!references?.length) return null;
+    return (
+      <div className="mt-3 border-t border-slate-100 pt-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-2">Internal references</p>
+        <div className="flex flex-wrap gap-2">
+          {references.map((ref) => (
+            <button
+              key={`${ref.id}-${ref.filePath}-${ref.page}`}
+              type="button"
+              onClick={() => setSelectedSource(sourceFromReference(ref))}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-sky-200 bg-white text-xs font-medium text-sky-700 hover:bg-sky-50 hover:border-sky-400 transition-colors"
+              title={ref.excerpt}
+            >
+              <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-700 flex items-center justify-center text-[10px] font-bold">
+                {ref.marker}
+              </span>
+              <span className="max-w-[220px] truncate">{ref.title}</span>
+              <span className="px-1 py-0.5 rounded bg-sky-100 text-[9px] font-bold uppercase text-sky-600">
+                {ref.fileType === "pptx" ? `Slide ${ref.page}` : ref.fileType === "pdf" ? `Page ${ref.page}` : "Doc"}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden">
 
       {/* ── Slim header ── */}
       <div className="shrink-0 bg-white border-b border-slate-100 px-6 py-3 flex items-center justify-between">
@@ -579,7 +794,37 @@ export default function ClientResearch({ config }: Props) {
                       <h3 className="text-sm font-bold text-slate-800">{section.title}</h3>
                     </div>
                     <div className="px-4 py-3 text-sm space-y-1">
+                      {section.harness && (
+                        <div className={`mb-3 rounded-xl border px-3 py-2 ${
+                          section.harness.status === "pass"
+                            ? "border-emerald-100 bg-emerald-50"
+                            : "border-amber-100 bg-amber-50"
+                        }`}>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            Agent harness · {section.harness.status === "pass" ? "Ready" : "Needs review"}
+                          </p>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {section.harness.retrievedItems} retrieved · {section.harness.evidenceRefs} evidence refs · {section.harness.fallbacks} fallbacks
+                          </p>
+                          {section.harness.warnings.slice(0, 2).map((warning, index) => (
+                            <p key={index} className="mt-1 text-[11px] text-amber-700">- {warning}</p>
+                          ))}
+                          {section.harness.agentTrace.length > 0 && (
+                            <details className="mt-2">
+                              <summary className="cursor-pointer text-[11px] font-semibold text-slate-500">Trace</summary>
+                              <div className="mt-1 space-y-0.5">
+                                {section.harness.agentTrace.map((entry, index) => (
+                                  <p key={index} className="text-[11px] text-slate-500">
+                                    {entry.step} · {entry.tool}{entry.query ? ` · "${entry.query}"` : ""}{typeof entry.found === "number" ? ` -> ${entry.found}` : ""}
+                                  </p>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      )}
                       {renderMarkdown(section.content)}
+                      {renderReferenceLinks(section.references)}
                     </div>
                   </div>
                 ))}
@@ -604,6 +849,7 @@ export default function ClientResearch({ config }: Props) {
                 </div>
                 <div className="flex-1 min-w-0 text-sm text-slate-700 leading-relaxed space-y-1 pt-1">
                   {renderMarkdown(msg.content)}
+                  {renderReferenceLinks(msg.references)}
                 </div>
               </div>
             )
@@ -665,6 +911,16 @@ export default function ClientResearch({ config }: Props) {
           )}
         </div>
       </div>
+      </div>
+
+      {selectedSource && (
+        <div className="fixed inset-0 z-50 md:static md:inset-auto md:z-auto flex">
+          <LocalDocPreview
+            source={selectedSource}
+            onClose={() => setSelectedSource(null)}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import type { RagChunk } from "./indexer";
 import { vectorSearch, ftsSearch, fetchParentsByIds } from "./store";
+import { recencyScore, isRecencySensitiveQuery } from "@/lib/recency";
 
 export interface RetrievedChunk extends RagChunk {
   score: number;
@@ -27,6 +28,25 @@ function filenameScore(terms: string[], fileName: string, filePath?: string): nu
   let hits = 0;
   for (const t of terms) {
     if (parts.some((p) => p.includes(t) || t.includes(p))) hits++;
+  }
+  return hits / Math.max(terms.length, 1);
+}
+
+function assetMetadataScore(terms: string[], chunk: RagChunk): number {
+  const text = [
+    chunk.documentAssetType,
+    chunk.sectionAssetType,
+    chunk.proofStrength,
+    ...(chunk.industries ?? []),
+    ...(chunk.serviceLines ?? []),
+    ...(chunk.technologies ?? []),
+    ...(chunk.reusableFor ?? []),
+    chunk.assetSummary,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (!text) return 0;
+  let hits = 0;
+  for (const term of terms) {
+    if (text.includes(term)) hits++;
   }
   return hits / Math.max(terms.length, 1);
 }
@@ -104,11 +124,25 @@ export async function retrieve(
     .sort((a, b) => b.s - a.s)
     .map((x) => x.i);
 
+  const assetRanking = pool
+    .map((c, i) => ({ i, s: assetMetadataScore(terms, c) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .map((x) => x.i);
+
+  const recencyRanking = pool
+    .map((c, i) => ({ i, s: recencyScore(query, c) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .map((x) => x.i);
+
   // 4. Merge with RRF
   const signals = [
     ...(semRanking.length ? [semRanking.slice(0, 40)] : []),
     ...(ftsRanking.length  ? [ftsRanking.slice(0, 40)]  : []),
     ...(fnRanking.length   ? [fnRanking.slice(0, 40)]   : []),
+    ...(assetRanking.length ? [assetRanking.slice(0, 40)] : []),
+    ...(isRecencySensitiveQuery(query) && recencyRanking.length ? [recencyRanking.slice(0, 40)] : []),
   ];
 
   const finalOrder: number[] =
@@ -122,7 +156,9 @@ export async function retrieve(
     const c = pool[i];
     const score = c.semScore
       + (c.ftsScore / maxFts) * 0.45
-      + filenameScore(terms, c.fileName, c.filePath) * 0.50;
+      + filenameScore(terms, c.fileName, c.filePath) * 0.50
+      + assetMetadataScore(terms, c) * 0.60
+      + recencyScore(query, c) * (isRecencySensitiveQuery(query) ? 0.8 : 0.25);
     return { chunk: c, score };
   }).sort((a, b) => b.score - a.score);
 

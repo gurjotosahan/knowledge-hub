@@ -38,13 +38,20 @@ export async function POST(req: NextRequest) {
 
   const aiConfig = resolveAiConfig({
     ollamaBaseUrl: String(form.get("ollamaBaseUrl") ?? ""),
+    ollamaModel: String(form.get("ollamaModel") ?? ""),
     ollamaEmbedModel: String(form.get("embedModel") ?? ""),
+    aiProvider: (String(form.get("aiProvider") ?? "") || undefined) as "ollama" | "openrouter" | "gemini" | undefined,
+    openrouterApiKey: String(form.get("openrouterApiKey") ?? ""),
+    openrouterModel: String(form.get("openrouterModel") ?? ""),
+    geminiApiKey: String(form.get("geminiApiKey") ?? ""),
+    geminiModel: String(form.get("geminiModel") ?? ""),
     embeddingProvider: form.get("embeddingProvider") === "google" ? "google" : "ollama",
   });
 
   const targetFolder = String(form.get("targetFolder") ?? "").trim() || UPLOAD_DIR;
   await mkdir(targetFolder, { recursive: true });
   const saved: string[] = [];
+  const uploadedFiles: { name: string; path: string }[] = [];
 
   for (const [index, file] of files.entries()) {
     const bytes = Buffer.from(await file.arrayBuffer());
@@ -53,6 +60,7 @@ export async function POST(req: NextRequest) {
     const path = join(targetFolder, `${base}-${Date.now()}-${index}${ext.toLowerCase()}`);
     await writeFile(path, bytes);
     saved.push(path);
+    uploadedFiles.push({ name: file.name, path });
   }
 
   const docs: ExtractedDoc[] = [];
@@ -67,11 +75,16 @@ export async function POST(req: NextRequest) {
     aiConfig.ollamaEmbedModel ?? "bge-large",
     () => {},
     aiConfig.embeddingProvider,
-    aiConfig.geminiApiKey
+    aiConfig.geminiApiKey,
+    {
+      enableAssetLlmEnrichment: String(form.get("enableAssetLlmEnrichment") ?? "") === "true",
+      assetLlmConfig: aiConfig,
+    }
   );
 
   return NextResponse.json({
     folderPath: targetFolder,
+    uploadedFiles,
     files: saved.length,
     chunks: result.chunks,
     indexedFiles: result.files,

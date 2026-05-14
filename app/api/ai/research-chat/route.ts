@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { buildInternalResearchContext } from "@/lib/internalResearchContext";
 import type { AgentConfig } from "@/lib/rag/agent";
 import type { ResearchSectionResult } from "@/types/research";
 import { resolveAiConfig } from "@/lib/serverConfig";
@@ -49,11 +50,14 @@ interface ChatBody {
   sections: ResearchSectionResult[];
   question: string;
   history: { role: "user" | "assistant"; content: string }[];
+  sourceKey?: string;
   aiProvider: "ollama" | "openrouter" | "gemini";
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  ollamaEmbedModel?: string;
   openrouterModel?: string;
   geminiModel?: string;
+  embeddingProvider?: "ollama" | "google";
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -64,6 +68,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { clientName, sections, question, history } = body;
 
   const config: AgentConfig = resolveAiConfig(body);
+  const internalContext = await buildInternalResearchContext(
+    body.sourceKey,
+    [
+      `${question} Apexon capabilities case studies proof points internal slides`,
+      `${clientName} ${question} Apexon services accelerators outcomes`,
+      `Apexon how can help ${clientName} ${question}`,
+    ],
+    config,
+    8
+  );
 
   const researchContext = sections
     .map((s) => `## ${s.emoji} ${s.title}\n${s.content}`)
@@ -77,7 +91,10 @@ Below is the research intelligence already gathered on ${clientName}:
 
 ${researchContext}
 
-Answer the analyst's follow-up questions using this research as your primary source. Be specific, cite facts from the research above, and always connect your answers to Apexon's ability to help. Keep answers concise and actionable — this is a presales context.`;
+Additional internal Apexon evidence from indexed documents/slides:
+${internalContext.text || "No additional internal Apexon document snippets were retrieved for this follow-up."}
+
+Answer the analyst's follow-up questions using the completed research plus the internal Apexon evidence. For "how can Apexon help" style questions, ground recommendations in internal snippets when available and cite them with markers like [I1]. Use external/prospect facts for client context, and internal documents for Apexon capabilities and proof points. If internal evidence is missing, say what proof point is missing instead of inventing it. Keep answers concise and actionable — this is a presales context.`;
 
   const messages = [
     { role: "system", content: systemPrompt },
@@ -87,7 +104,13 @@ Answer the analyst's follow-up questions using this research as your primary sou
 
   try {
     const answer = await callLLM(messages, config);
-    return NextResponse.json({ answer });
+    const cited = [...answer.matchAll(/\[I(\d+)\]/g)]
+      .map((match) => internalContext.references[Number(match[1]) - 1])
+      .filter(Boolean);
+    return NextResponse.json({
+      answer,
+      references: cited.length ? cited : internalContext.references.slice(0, 5),
+    });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

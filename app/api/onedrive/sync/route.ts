@@ -20,6 +20,13 @@ interface SyncBody {
   ollamaBaseUrl?:    string;
   embedModel?:       string;
   embeddingProvider?: "ollama" | "google";
+  enableAssetLlmEnrichment?: boolean;
+  aiProvider?: "ollama" | "openrouter" | "gemini";
+  ollamaModel?: string;
+  openrouterApiKey?: string;
+  openrouterModel?: string;
+  geminiApiKey?: string;
+  geminiModel?: string;
 }
 
 async function listFilesRecursive(token: string, itemId: string): Promise<{ id: string; name: string }[]> {
@@ -63,7 +70,13 @@ export async function POST(req: NextRequest): Promise<Response> {
   } = body;
   const aiConfig = resolveAiConfig({
     ollamaBaseUrl: body.ollamaBaseUrl,
+    ollamaModel: body.ollamaModel,
     ollamaEmbedModel: body.embedModel,
+    aiProvider: body.aiProvider,
+    openrouterApiKey: body.openrouterApiKey,
+    openrouterModel: body.openrouterModel,
+    geminiApiKey: body.geminiApiKey,
+    geminiModel: body.geminiModel,
     embeddingProvider: body.embeddingProvider,
   });
 
@@ -123,7 +136,11 @@ export async function POST(req: NextRequest): Promise<Response> {
           aiConfig.ollamaEmbedModel ?? "bge-large",
           (msg) => send({ msg }),
           aiConfig.embeddingProvider,
-          aiConfig.geminiApiKey
+          aiConfig.geminiApiKey,
+          {
+            enableAssetLlmEnrichment: Boolean(body.enableAssetLlmEnrichment),
+            assetLlmConfig: aiConfig,
+          }
         );
         send({ done: true, ...result });
       } catch (err) {

@@ -1,4 +1,4 @@
-import type { Source, Document, ServiceLine, SlideSearchGroup, SlideSearchTopicGroup, SearchableFileType } from "@/types";
+import type { Source, Document, ServiceLine, SlideSearchGroup, SlideSearchTopicGroup, SearchableFileType, AgentHarnessReport } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -39,6 +39,7 @@ export interface StoredTurn {
   docs?: StoredDoc[];
   slideGroups?: SlideSearchGroup[];
   slideTopicGroups?: SlideSearchTopicGroup[];
+  harness?: AgentHarnessReport;
   agentLog?: StoredAgentLogEntry[];
   tokenUsage?: StoredTokenUsage;
 }

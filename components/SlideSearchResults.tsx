@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import type { SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
+import PdfPageCanvas from "@/components/PdfPageCanvas";
 
 interface SlideSearchResultsProps {
   groups: SlideSearchGroup[];
@@ -25,6 +26,32 @@ function confidenceClass(confidence?: SlideSearchResult["confidence"]): string {
   if (confidence === "High") return "bg-emerald-50 text-emerald-700 border-emerald-200";
   if (confidence === "Medium") return "bg-amber-50 text-amber-700 border-amber-200";
   return "bg-slate-50 text-slate-500 border-slate-200";
+}
+
+function SlidePreviewThumb({ slide }: { slide: SlideSearchResult }) {
+  if (slide.thumbnailUrl) {
+    return (
+      <img
+        src={slide.thumbnailUrl}
+        alt={`Slide ${slide.slideNumber} preview`}
+        className="h-20 w-32 rounded-lg border border-slate-200 bg-slate-100 object-cover"
+      />
+    );
+  }
+
+  if (slide.previewPdfUrl) {
+    return (
+      <div className="h-20 w-32 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+        <PdfPageCanvas fileUrl={slide.previewPdfUrl} pageNumber={slide.slideNumber} displayWidth={128} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-20 w-32 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-sky-700">
+      Slide {slide.slideNumber}
+    </div>
+  );
 }
 
 export default function SlideSearchResults({ groups, topicGroups = [], onPreviewSlide }: SlideSearchResultsProps) {
@@ -173,17 +200,29 @@ export default function SlideSearchResults({ groups, topicGroups = [], onPreview
                   />
                   <button
                     onClick={() => onPreviewSlide(group, slide)}
-                    className="min-w-[72px] rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50"
+                    className="shrink-0 text-left"
+                    title={`Preview slide ${slide.slideNumber}`}
                   >
-                    Slide {slide.slideNumber}
+                    <SlidePreviewThumb slide={slide} />
+                    <span className="mt-1 block text-center text-[10px] font-semibold text-slate-500">
+                      Slide {slide.slideNumber}
+                    </span>
                   </button>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start gap-2">
                       <p className="min-w-0 flex-1 text-xs font-medium text-slate-700">{slide.reason}</p>
+                      {slide.assetYear && (
+                        <span className="shrink-0 rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
+                          {slide.yearConfidence === "low" ? `${slide.assetYear} inferred` : slide.assetYear}
+                        </span>
+                      )}
                       <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${confidenceClass(slide.confidence)}`}>
                         {slide.confidence ?? "Low"}
                       </span>
                     </div>
+                    {slide.recencyNote && (
+                      <p className="mt-1 text-[11px] font-medium text-sky-700">{slide.recencyNote}</p>
+                    )}
                     {slide.excerpt && (
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{slide.excerpt}</p>
                     )}

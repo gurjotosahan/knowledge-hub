@@ -19,6 +19,14 @@ export async function POST(req: NextRequest) {
     ollamaBaseUrl?: string;
     embedModel?: string;
     embeddingProvider?: "ollama" | "google";
+    generateSlidePreviews?: boolean;
+    enableAssetLlmEnrichment?: boolean;
+    aiProvider?: "ollama" | "openrouter" | "gemini";
+    ollamaModel?: string;
+    openrouterApiKey?: string;
+    openrouterModel?: string;
+    geminiApiKey?: string;
+    geminiModel?: string;
   };
   try {
     body = await req.json();
@@ -29,7 +37,13 @@ export async function POST(req: NextRequest) {
   const { folderPath } = body;
   const aiConfig = resolveAiConfig({
     ollamaBaseUrl: body.ollamaBaseUrl,
+    ollamaModel: body.ollamaModel,
     ollamaEmbedModel: body.embedModel,
+    aiProvider: body.aiProvider,
+    openrouterApiKey: body.openrouterApiKey,
+    openrouterModel: body.openrouterModel,
+    geminiApiKey: body.geminiApiKey,
+    geminiModel: body.geminiModel,
     embeddingProvider: body.embeddingProvider,
   });
 
@@ -50,7 +64,12 @@ export async function POST(req: NextRequest) {
           aiConfig.ollamaEmbedModel ?? "bge-large",
           (msg) => send({ msg }),
           aiConfig.embeddingProvider,
-          aiConfig.geminiApiKey
+          aiConfig.geminiApiKey,
+          {
+            generateSlidePreviews: Boolean(body.generateSlidePreviews),
+            enableAssetLlmEnrichment: Boolean(body.enableAssetLlmEnrichment),
+            assetLlmConfig: aiConfig,
+          }
         );
         send({ done: true, ...result });
       } catch (err) {

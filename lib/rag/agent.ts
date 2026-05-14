@@ -1,4 +1,5 @@
 import { retrieve, type RetrievedChunk } from "./retriever";
+import { isParallelMcpEnabled, searchWithParallelMcp } from "@/lib/parallelMcp";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai";
 
@@ -22,6 +23,7 @@ export interface WebResult {
   title: string;
   url: string;
   content: string;
+  extracted?: boolean;
 }
 
 export interface AgentLogEntry {
@@ -129,7 +131,48 @@ export async function getEmbedding(text: string, config: AgentConfig): Promise<n
   return ((await res.json()).embeddings?.[0] as number[]) ?? [];
 }
 
-export async function searchWeb(query: string, apiKey: string): Promise<WebResult[]> {
+async function extractWithTavily(
+  urls: string[],
+  query: string,
+  apiKey: string
+): Promise<Map<string, string>> {
+  if (!urls.length) return new Map();
+
+  const res = await fetch("https://api.tavily.com/extract", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      urls,
+      query,
+      chunks_per_source: 5,
+      extract_depth: "advanced",
+      format: "markdown",
+      include_images: false,
+      include_favicon: false,
+      timeout: 20,
+    }),
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!res.ok) return new Map();
+
+  const data = await res.json();
+  const extracted = new Map<string, string>();
+  for (const result of data.results ?? []) {
+    if (typeof result.url !== "string" || typeof result.raw_content !== "string") continue;
+    const content = result.raw_content.replace(/\s{3,}/g, "\n\n").trim();
+    if (content) extracted.set(result.url, content.slice(0, 8_000));
+  }
+  return extracted;
+}
+
+export async function searchWeb(query: string, apiKey?: string): Promise<WebResult[]> {
+  const parallelResults = await searchWithParallelMcp(query).catch(() => [] as WebResult[]);
+  if (parallelResults.length) return parallelResults;
+  if (!apiKey) return [];
+
   const res = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -145,11 +188,19 @@ export async function searchWeb(query: string, apiKey: string): Promise<WebResul
   });
   if (!res.ok) return [];
   const data = await res.json();
-  return (data.results ?? []).map((r: { title: string; url: string; content: string }) => ({
+  const results = (data.results ?? []).map((r: { title: string; url: string; content: string }) => ({
     title: r.title ?? "",
     url: r.url ?? "",
     content: r.content ?? "",
   }));
+
+  const topUrls = results.slice(0, 3).map((result: WebResult) => result.url).filter(Boolean);
+  const extractedByUrl = await extractWithTavily(topUrls, query, apiKey).catch(() => new Map<string, string>());
+
+  return results.map((result: WebResult) => {
+    const content = extractedByUrl.get(result.url);
+    return content ? { ...result, content, extracted: true } : result;
+  });
 }
 
 // ── Internal LLM caller with tool support ─────────────────────────────────────
@@ -457,7 +508,7 @@ export async function runAgent(
   const seenWebUrls = new Set<string>();
   let totalAgentTokens = 0;
 
-  const canWeb = config.searchMode === "mixed" && Boolean(config.tavilyApiKey);
+  const canWeb = config.searchMode === "mixed" && (Boolean(config.tavilyApiKey) || isParallelMcpEnabled());
   const toolList = canWeb
     ? [TOOL_SEARCH_DOCS, TOOL_SEARCH_WEB]
     : [TOOL_SEARCH_DOCS];
@@ -493,7 +544,7 @@ export async function runAgent(
       ? Math.round(iterTokens / response.tool_calls.length)
       : 0;
 
-    for (const call of response.tool_calls) {
+    const toolResults = await Promise.all(response.tool_calls.map(async (call) => {
       let args: Record<string, string>;
       try { args = JSON.parse(call.function.arguments); }
       catch { args = { query }; }
@@ -503,34 +554,44 @@ export async function runAgent(
       if (call.function.name === "search_documents") {
         const emb = await getEmbedding(q, config).catch(() => null);
         const chunks = await retrieve(q, emb, sourceKey, 20).catch(() => [] as RetrievedChunk[]);
-        const fresh = chunks.filter((c) => !seenChunkIds.has(c.id));
+        return { call, q, tool: "search_documents" as const, chunks };
+      }
+
+      if (call.function.name === "search_web" && canWeb) {
+        const results = await searchWeb(q, config.tavilyApiKey).catch(() => [] as WebResult[]);
+        return { call, q, tool: "search_web" as const, results };
+      }
+
+      return { call, q, tool: "unavailable" as const };
+    }));
+
+    for (const result of toolResults) {
+      if (result.tool === "search_documents") {
+        const fresh = result.chunks.filter((c) => !seenChunkIds.has(c.id));
         fresh.forEach((c) => { seenChunkIds.add(c.id); allChunks.push(c); });
 
-        log.push({ iteration: iter + 1, tool: "search_documents", query: q, found: fresh.length, tokens: tokensPerCall });
+        log.push({ iteration: iter + 1, tool: "search_documents", query: result.q, found: fresh.length, tokens: tokensPerCall });
         messages.push({
           role: "tool",
-          tool_call_id: call.id,
+          tool_call_id: result.call.id,
           content: fresh.length
             ? fresh.map((c) => `[${c.fileName} | Slide ${c.page}]\n${c.text}`).join("\n\n---\n\n")
             : "No documents found for this query.",
         });
-
-      } else if (call.function.name === "search_web" && canWeb) {
-        const results = await searchWeb(q, config.tavilyApiKey!).catch(() => [] as WebResult[]);
-        const fresh = results.filter((r) => !seenWebUrls.has(r.url));
+      } else if (result.tool === "search_web") {
+        const fresh = result.results.filter((r) => !seenWebUrls.has(r.url));
         fresh.forEach((r) => { seenWebUrls.add(r.url); allWebResults.push(r); });
 
-        log.push({ iteration: iter + 1, tool: "search_web", query: q, found: fresh.length, tokens: tokensPerCall });
+        log.push({ iteration: iter + 1, tool: "search_web", query: result.q, found: fresh.length, tokens: tokensPerCall });
         messages.push({
           role: "tool",
-          tool_call_id: call.id,
+          tool_call_id: result.call.id,
           content: fresh.length
             ? fresh.map((r) => `[${r.title} | ${r.url}]\n${r.content}`).join("\n\n---\n\n")
             : "No web results found.",
         });
-
       } else {
-        messages.push({ role: "tool", tool_call_id: call.id, content: "Tool not available." });
+        messages.push({ role: "tool", tool_call_id: result.call.id, content: "Tool not available." });
       }
     }
 
@@ -544,5 +605,217 @@ export async function runAgent(
     log,
     usedAgent: log.length > 0,
     totalAgentTokens,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AGENTIC RAG ENHANCEMENTS - Query Decomposition, Self-Correction, Synthesis
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Decomposes a complex research query into simpler sub-queries for better retrieval.
+ * This helps when the original query has multiple aspects that need separate searches.
+ */
+export async function decomposeQuery(
+  query: string,
+  config: AgentConfig
+): Promise<string[]> {
+  const system = `You are a research query analyzer. Decompose complex questions into simpler sub-queries.`;
+
+  const user = `Decompose this research query into 3-5 focused sub-queries that can be answered independently:
+
+"${query}"
+
+Return a JSON array of sub-queries:
+["sub-query 1", "sub-query 2", ...]`;
+
+  try {
+    const response = await callLLM(
+      [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      [],
+      config
+    );
+    const parsed = JSON.parse(response.content || "[]");
+    return Array.isArray(parsed) ? parsed : [query];
+  } catch {
+    return [query]; // Fallback to original
+  }
+}
+
+/**
+ * Self-correction: Verify that retrieved content actually answers the query.
+ * If not, generate a follow-up query to fill the gaps.
+ */
+export async function verifyContentRelevance(
+  query: string,
+  chunks: RetrievedChunk[],
+  webResults: WebResult[],
+  config: AgentConfig
+): Promise<{ relevant: RetrievedChunk[]; missingAspects: string[]; followUpQueries: string[] }> {
+  const system = `You are a research relevance verifier. Check if retrieved content answers the user's question.`;
+
+  const docContent = chunks.slice(0, 5).map(c => c.text.slice(0, 500)).join("\n\n---\n\n");
+  const webContent = webResults.slice(0, 3).map(r => `${r.title}: ${r.content?.slice(0, 300)}`).join("\n\n---\n\n");
+
+  const user = `Check if these sources answer the user's question: "${query}"
+
+DOCUMENTS:
+${docContent}
+
+WEB RESULTS:
+${webContent}
+
+Return JSON with:
+{
+  "relevant_aspects": ["aspect 1", "aspect 2"],
+  "missing_aspects": ["what's not covered"],
+  "follow_up_queries": ["query to fill gap 1", "query to fill gap 2"]
+}`;
+
+  try {
+    const response = await callLLM(
+      [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      [],
+      config
+    );
+    const parsed = JSON.parse(response.content || "{}");
+    return {
+      relevant: chunks,
+      missingAspects: parsed.missing_aspects || [],
+      followUpQueries: parsed.follow_up_queries || [],
+    };
+  } catch {
+    return { relevant: chunks, missingAspects: [], followUpQueries: [] };
+  }
+}
+
+/**
+ * Synthesizes information from multiple sources into a coherent research response.
+ */
+export async function synthesizeResults(
+  query: string,
+  chunks: RetrievedChunk[],
+  webResults: WebResult[],
+  config: AgentConfig
+): Promise<string> {
+  const system = `You are a senior consultant synthesizing research. Create a coherent narrative from multiple sources.`;
+
+  const docSources = chunks.slice(0, 8).map((c, i) =>
+    `[Doc ${i + 1}: ${c.fileName} | Slide ${c.page}]\n${c.text.slice(0, 600)}`
+  ).join("\n\n---\n\n");
+
+  const webSources = webResults.slice(0, 5).map((r, i) =>
+    `[Web ${i + 1}: ${r.title}]\n${r.content?.slice(0, 400) || r.url}`
+  ).join("\n\n---\n\n");
+
+  const user = `Create a coherent research synthesis answering: "${query}"
+
+DOCUMENTS:
+${docSources}
+
+WEB RESULTS:
+${webSources}
+
+Provide a structured synthesis with:
+1. Key findings
+2. Supporting evidence (cite sources)
+3. Any gaps or caveats
+4. Recommendations if applicable`;
+
+  try {
+    const response = await callLLM(
+      [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      [],
+      config
+    );
+    return response.content || "Unable to synthesize results.";
+  } catch {
+    return "Synthesis failed. Please review sources manually.";
+  }
+}
+
+/**
+ * Full agentic RAG pipeline: decompose → retrieve → verify → synthesize
+ */
+export async function agenticRAG(
+  query: string,
+  config: AgentConfig,
+  sourceKey = "agentic-rag"
+): Promise<{
+  chunks: RetrievedChunk[];
+  webResults: WebResult[];
+  synthesis: string;
+  log: AgentLogEntry[];
+  decomposition: string[];
+  verification: { missingAspects: string[]; followUpQueries: string[] };
+}> {
+  const log: AgentLogEntry[] = [];
+
+  // Step 1: Decompose query
+  const subQueries = await decomposeQuery(query, config);
+  log.push({ iteration: 1, tool: "decompose", query, found: subQueries.length });
+
+  // Step 2: Search with sub-queries (using existing search)
+  const allChunks: RetrievedChunk[] = [];
+  const allWeb: WebResult[] = [];
+
+  for (const sq of subQueries) {
+    const result = await runAgent(sq, config, sourceKey);
+    allChunks.push(...result.chunks);
+    allWeb.push(...result.webResults);
+    log.push(...result.log.map((l: AgentLogEntry) => ({ ...l, iteration: l.iteration + 1 })));
+  }
+
+  // Deduplicate
+  const seenChunkIds = new Set<string>();
+  const uniqueChunks = allChunks.filter(c => {
+    if (seenChunkIds.has(c.id)) return false;
+    seenChunkIds.add(c.id);
+    return true;
+  });
+
+  const seenUrls = new Set<string>();
+  const uniqueWeb = allWeb.filter(r => {
+    if (seenUrls.has(r.url)) return false;
+    seenUrls.add(r.url);
+    return true;
+  });
+
+  // Step 3: Verify relevance
+  const verification = await verifyContentRelevance(query, uniqueChunks, uniqueWeb, config);
+  log.push({ iteration: log.length + 1, tool: "verify", query: "relevance check", found: verification.missingAspects.length });
+
+  // Step 4: Follow-up if gaps
+  let finalChunks = uniqueChunks;
+  let finalWeb = uniqueWeb;
+
+  if (verification.followUpQueries.length > 0) {
+    for (const fq of verification.followUpQueries.slice(0, 2)) {
+      const followResult = await runAgent(fq, config, sourceKey);
+      finalChunks.push(...followResult.chunks.filter((c: RetrievedChunk) => !seenChunkIds.has(c.id)));
+      finalWeb.push(...followResult.webResults.filter((r: WebResult) => !seenUrls.has(r.url)));
+      log.push({ iteration: log.length + 1, tool: "follow-up", query: fq, found: followResult.chunks.length });
+    }
+  }
+
+  // Step 5: Synthesize
+  const synthesis = await synthesizeResults(query, finalChunks, finalWeb, config);
+
+  return {
+    chunks: finalChunks.slice(0, 10),
+    webResults: finalWeb.slice(0, 5),
+    synthesis,
+    log,
+    decomposition: subQueries,
+    verification,
   };
 }

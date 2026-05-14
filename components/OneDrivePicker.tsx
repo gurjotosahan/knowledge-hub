@@ -2,17 +2,26 @@
 
 import { useEffect, useState, useCallback } from "react";
 import type { LocalSourceEntry } from "@/types";
+import type { AIProvider } from "@/types";
 
 interface SessionInfo { signedIn: boolean; name?: string; email?: string }
 interface Props {
   embeddingProvider: "ollama" | "google";
   ollamaBaseUrl:  string;
   embedModel:     string;
+  enableAssetLlmEnrichment?: boolean;
+  aiProvider?: AIProvider;
+  ollamaModel?: string;
+  openrouterApiKey?: string;
+  openrouterModel?: string;
+  geminiApiKey?: string;
+  geminiModel?: string;
   onIndexed?:     () => void;
 }
 
 export default function OneDrivePicker({
-  embeddingProvider, ollamaBaseUrl, embedModel, onIndexed,
+  embeddingProvider, ollamaBaseUrl, embedModel, enableAssetLlmEnrichment = false,
+  aiProvider, ollamaModel, openrouterApiKey, openrouterModel, geminiApiKey, geminiModel, onIndexed,
 }: Props) {
   const [session,   setSession]   = useState<SessionInfo | null>(null);
   const [entries,   setEntries]   = useState<LocalSourceEntry[]>([]);
@@ -72,6 +81,16 @@ export default function OneDrivePicker({
     setSelected(new Set(fileIds));
   };
 
+  const aiPayload = {
+    enableAssetLlmEnrichment,
+    aiProvider,
+    ollamaModel,
+    openrouterApiKey,
+    openrouterModel,
+    geminiApiKey,
+    geminiModel,
+  };
+
   const syncSelected = async () => {
     if (selected.size === 0) return;
     setSyncing(true); setSyncLog([]); setSyncError(""); setSyncDone(false);
@@ -83,6 +102,7 @@ export default function OneDrivePicker({
         body: JSON.stringify({
           itemIds,
           embeddingProvider, ollamaBaseUrl, embedModel,
+          ...aiPayload,
         }),
       });
       if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);
@@ -120,6 +140,7 @@ export default function OneDrivePicker({
           folderItemId:  currentFolder.id,
           syncFolderMode: true,
           embeddingProvider, ollamaBaseUrl, embedModel,
+          ...aiPayload,
         }),
       });
       if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);

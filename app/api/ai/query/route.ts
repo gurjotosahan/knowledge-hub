@@ -8,12 +8,20 @@ import {
   compressContextChunks,
   getEmbedding,
   searchWeb,
+  agenticRAG,
   type AgentConfig,
   type WebResult,
 } from "@/lib/rag/agent";
 import { resolveAiConfig } from "@/lib/serverConfig";
+import { isParallelMcpEnabled } from "@/lib/parallelMcp";
+import {
+  buildAgentHarnessReport,
+  classifyAgentIntent,
+  countCitationMarkers,
+  type AgentHarnessTraceEntry,
+} from "@/lib/agentHarness";
 import type { RetrievedChunk } from "@/lib/rag/retriever";
-import type { ServiceLine } from "@/types";
+import type { ServiceLine, SlideSearchGroup } from "@/types";
 
 export const maxDuration = 300;
 
@@ -33,6 +41,9 @@ interface QueryBody {
   embeddingProvider?: "ollama" | "google";
   searchMode?: "rag" | "mixed";
   tavilyApiKey?: string;
+  useAgenticRag?: boolean; // Enable agentic RAG pipeline
+  uploadedFilePaths?: string[];
+  uploadedFileNames?: string[];
 }
 
 interface AICitation {
@@ -345,6 +356,30 @@ async function generateHypotheticalPassage(
   return ((await res.json()).choices?.[0]?.message?.content ?? "").trim();
 }
 
+function deterministicQueryVariants(query: string): string[] {
+  const lower = query.toLowerCase();
+  const variants: string[] = [];
+  const wantsBanking = /\b(bank|banking|bfsi|financial services|finance)\b/.test(lower);
+  const wantsCapabilities = /\b(capability|capabilities|competenc(?:y|ies)|expertise|offering|offerings)\b/.test(lower);
+
+  if (wantsBanking && wantsCapabilities) {
+    variants.push(
+      "banking practice confluence technology domain",
+      "banking practice credentials financial services",
+      "BFSI domain technology banking practice capabilities"
+    );
+  }
+
+  if (wantsCapabilities) {
+    variants.push(
+      query.replace(/\bcapabilit(?:y|ies)\b/gi, "practice credentials"),
+      query.replace(/\bcapabilit(?:y|ies)\b/gi, "domain expertise offerings")
+    );
+  }
+
+  return variants.filter((variant, index, arr) => variant.trim() && arr.indexOf(variant) === index);
+}
+
 function crossQueryRRF(resultSets: RetrievedChunk[][], topK: number, k = 60): RetrievedChunk[] {
   const scores = new Map<string, number>();
   const seen   = new Map<string, RetrievedChunk>();
@@ -362,6 +397,37 @@ function crossQueryRRF(resultSets: RetrievedChunk[][], topK: number, k = 60): Re
     .filter(Boolean);
 }
 
+function buildSlideGroupsFromChunks(chunks: RetrievedChunk[], intent: string): SlideSearchGroup[] {
+  if (intent !== "find_assets") return [];
+  const localServeUrl = (filePath?: string) => filePath ? `/api/local/serve?path=${encodeURIComponent(filePath)}` : undefined;
+  const pptChunks = chunks.filter((chunk) => chunk.fileType === "pptx").slice(0, 12);
+  const byFile = new Map<string, RetrievedChunk[]>();
+  for (const chunk of pptChunks) {
+    const existing = byFile.get(chunk.filePath) ?? [];
+    existing.push(chunk);
+    byFile.set(chunk.filePath, existing);
+  }
+  return [...byFile.entries()].map(([filePath, fileChunks]) => ({
+    filePath,
+    fileTitle: fileChunks[0].fileName.replace(/\.pptx$/i, "").replace(/[-_]/g, " "),
+    fileType: "pptx" as const,
+    slides: fileChunks.slice(0, 5).map((chunk) => ({
+      slideNumber: chunk.page,
+      reason: "Matched by unified Knowledge Search retrieval.",
+      excerpt: chunk.text.slice(0, 320),
+      score: chunk.score,
+      confidence: (chunk.score ?? 0) > 0.75 ? "High" as const : "Medium" as const,
+      thumbnailUrl: localServeUrl(chunk.thumbnailPath),
+      previewPdfUrl: localServeUrl(chunk.previewPdfPath),
+      previewStatus: chunk.previewStatus,
+    })),
+  }));
+}
+
+function sourcesWillBeEmpty(citations: AICitation[]): boolean {
+  return citations.length === 0;
+}
+
 // ── Main handler ───────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -373,6 +439,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { query, aiProvider } = body;
+  const intent = classifyAgentIntent(query);
   const entityTerms = extractEntityTerms(query);
   const sourceKey = body.sourceKey ?? body.folderPath ?? "";
   if (!query || !sourceKey) {
@@ -420,36 +487,77 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 2. Retrieve context — agent first, fallback to hybrid pipeline ──────────
-  let contextChunks: RetrievedChunk[];
-  let webResults: WebResult[];
+  let contextChunks: RetrievedChunk[] = [];
+  let webResults: WebResult[] = [];
   let agentLog: { iteration: number; tool: string; query: string; found: number }[] = [];
+  let agenticSynthesis: string | undefined;
+  let usedAgent = false;
+  let agentTokens = 0;
+  let fallbackCount = 0;
+  const harnessTrace: AgentHarnessTraceEntry[] = [
+    { step: "intent", tool: "intent_classifier", query, found: 1, status: "ok", note: intent },
+  ];
 
-  const agentResult = await runAgent(query, agentConfig, sourceKey).catch(() => ({
-    chunks: [] as RetrievedChunk[],
-    webResults: [] as WebResult[],
-    log: [] as { iteration: number; tool: string; query: string; found: number; tokens?: number }[],
-    usedAgent: false,
-    totalAgentTokens: 0,
-  }));
+  // Use Agentic RAG if requested
+  if (body.useAgenticRag) {
+    console.log("[Agentic RAG] Using enhanced pipeline with decomposition + verification + synthesis");
+    const agenticResult = await agenticRAG(query, agentConfig).catch(() => null);
 
-  if (agentResult.usedAgent) {
-    // Agent successfully called tools — use its results.
-    // Sort by retrieval score before reranking so the cut-off is score-ordered,
-    // not arrival-ordered (chunks from later tool calls were appended last).
-    const rawAgentChunks = await filterChunksByNamedEntitiesWithDeckContext(agentResult.chunks, entityTerms, sourceKey);
-    rawAgentChunks.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-    contextChunks = await rerankChunks(query, rawAgentChunks, agentConfig, 8);
-    webResults    = filterByNamedEntities(agentResult.webResults, entityTerms);
-    agentLog      = agentResult.log;
-    console.log(`[Agent] ${agentLog.length} tool calls across ${new Set(agentLog.map(l => l.iteration)).size} iterations, ${contextChunks.length} chunks, ${webResults.length} web results`);
-  } else {
-    // Fallback: existing HyDE + multi-query hybrid pipeline
-    console.log("[Agent] Model doesn't support tool calling — using hybrid fallback");
+    if (agenticResult) {
+      const filteredChunks = await filterChunksByNamedEntitiesWithDeckContext(agenticResult.chunks, entityTerms, sourceKey);
+      contextChunks = await rerankChunks(query, filteredChunks, agentConfig, 8);
+      webResults = filterByNamedEntities(agenticResult.webResults, entityTerms);
+      agentLog = agenticResult.log;
+      agenticSynthesis = agenticResult.synthesis;
+      usedAgent = true;
+      agentTokens = agenticResult.log.length * 100; // Estimate
+      console.log(`[Agentic RAG] ${agenticResult.decomposition.length} sub-queries, ${contextChunks.length} chunks, ${webResults.length} web`);
+      harnessTrace.push({
+        step: "retrieve",
+        tool: "agentic_rag",
+        query,
+        found: contextChunks.length + webResults.length,
+        status: "ok",
+        note: `${agenticResult.decomposition.length} decomposed queries`,
+      });
+    } else {
+      console.log("[Agentic RAG] Failed, falling back to standard agent");
+      fallbackCount++;
+      harnessTrace.push({ step: "retrieve", tool: "agentic_rag", query, found: 0, status: "fallback", note: "Agentic RAG failed; standard retrieval used." });
+    }
+  }
+
+  // Standard agent (only runs when the heavier agentic workflow is explicitly enabled).
+  // Normal Knowledge Search uses the faster hybrid retrieval path below.
+  if (body.useAgenticRag && contextChunks.length === 0) {
+    const agentResult = await runAgent(query, agentConfig, sourceKey).catch(() => ({
+      chunks: [] as RetrievedChunk[],
+      webResults: [] as WebResult[],
+      log: [] as { iteration: number; tool: string; query: string; found: number; tokens?: number }[],
+      usedAgent: false,
+      totalAgentTokens: 0,
+    }));
+
+    if (agentResult.usedAgent) {
+      const rawAgentChunks = await filterChunksByNamedEntitiesWithDeckContext(agentResult.chunks, entityTerms, sourceKey);
+      rawAgentChunks.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+      contextChunks = await rerankChunks(query, rawAgentChunks, agentConfig, 8);
+      webResults = filterByNamedEntities(agentResult.webResults, entityTerms);
+      agentLog = agentResult.log;
+      usedAgent = true;
+      agentTokens = agentResult.totalAgentTokens;
+      console.log(`[Agent] ${agentLog.length} tool calls, ${contextChunks.length} chunks, ${webResults.length} web`);
+      harnessTrace.push({ step: "retrieve", tool: "standard_agent", query, found: contextChunks.length + webResults.length, status: "ok" });
+    }
+  }
+
+  if (contextChunks.length === 0 && webResults.length === 0) {
+    console.log(body.useAgenticRag ? "[Agent] Agent path empty — using hybrid fallback" : "[Search] Using fast hybrid retrieval");
     const [hypothetical, alternatives] = await Promise.all([
       generateHypotheticalPassage(query, resolvedBody, ollamaBase).catch(() => ""),
       generateAlternativeQueries(query, resolvedBody, ollamaBase).catch(() => [] as string[]),
     ]);
-    const queryVariants: string[] = [...new Set([query, hypothetical, ...alternatives].filter(Boolean))];
+    const queryVariants: string[] = [...new Set([query, ...deterministicQueryVariants(query), hypothetical, ...alternatives].filter(Boolean))];
 
     const embeddingResults = await Promise.allSettled(
       queryVariants.map((q) => getEmbedding(q, agentConfig))
@@ -460,10 +568,10 @@ export async function POST(req: NextRequest) {
         queryVariants.map((q, i) => {
           const embResult = embeddingResults[i];
           const emb = embResult.status === "fulfilled" ? embResult.value : null;
-          return retrieve(q, emb, sourceKey, 12, i === 0 ? (hypothetical || undefined) : undefined);
+          return retrieve(q, emb, sourceKey, 16, i === 0 ? (hypothetical || undefined) : undefined);
         })
       ),
-      resolvedBody.searchMode === "mixed" && resolvedBody.tavilyApiKey
+      resolvedBody.searchMode === "mixed" && (resolvedBody.tavilyApiKey || isParallelMcpEnabled())
         ? searchWeb(query, resolvedBody.tavilyApiKey).catch(() => [] as WebResult[])
         : Promise.resolve([] as WebResult[]),
     ]);
@@ -472,19 +580,46 @@ export async function POST(req: NextRequest) {
       .filter((r): r is PromiseFulfilledResult<RetrievedChunk[]> => r.status === "fulfilled")
       .map((r) => r.value);
 
-    const rawFallbackChunks = await filterChunksByNamedEntitiesWithDeckContext(crossQueryRRF(allRetrievals, 12), entityTerms, sourceKey);
-    contextChunks = await rerankChunks(query, rawFallbackChunks, agentConfig, 8);
-    webResults    = filterByNamedEntities(fallbackWebResults, entityTerms);
+    const rawFallbackChunks = await filterChunksByNamedEntitiesWithDeckContext(crossQueryRRF(allRetrievals, 18), entityTerms, sourceKey);
+    contextChunks = await rerankChunks(query, rawFallbackChunks, agentConfig, 12);
+    webResults = filterByNamedEntities(fallbackWebResults, entityTerms);
+    harnessTrace.push({
+      step: "retrieve",
+      tool: "hybrid_rag",
+      query,
+      found: contextChunks.length + webResults.length,
+      status: body.useAgenticRag ? "fallback" : "ok",
+      note: body.useAgenticRag ? "Agent path unavailable; used HyDE + multi-query retrieval." : "Fast retrieval path used.",
+    });
   }
 
-  // Safety net: if internal search found nothing AND a Tavily key exists, always try web.
+  // Safety net: if internal search found nothing AND web search is available, always try web.
   // Fires regardless of searchMode — zero internal results is always a good reason to check the web.
-  if (contextChunks.length === 0 && webResults.length === 0 && resolvedBody.tavilyApiKey) {
+  if (contextChunks.length === 0 && webResults.length === 0 && (resolvedBody.tavilyApiKey || isParallelMcpEnabled())) {
     console.log("[Agent] Safety net: zero internal results, falling back to web search");
     webResults = filterByNamedEntities(
       await searchWeb(query, resolvedBody.tavilyApiKey).catch(() => []),
       entityTerms
     );
+    fallbackCount++;
+    harnessTrace.push({ step: "retrieve", tool: "web_safety_net", query, found: webResults.length, status: "fallback", note: "No internal results; used web safety net." });
+  }
+
+  const uploadedFilePaths = (body.uploadedFilePaths ?? []).filter((path): path is string => typeof path === "string" && path.length > 0);
+  const uploadedFileNames = (body.uploadedFileNames ?? []).filter((name): name is string => typeof name === "string" && name.length > 0);
+  if (uploadedFilePaths.length > 0) {
+    const uploadedParents = (await Promise.all(
+      uploadedFilePaths.map((filePath) => fetchFileParents(sourceKey, filePath).catch(() => []))
+    )).flat();
+    const uploadedChunks: RetrievedChunk[] = uploadedParents.map((chunk, index) => ({
+      ...chunk,
+      score: 10_000 - index,
+    }));
+    const existingIds = new Set(uploadedChunks.map((chunk) => chunk.id));
+    contextChunks = [
+      ...uploadedChunks,
+      ...contextChunks.filter((chunk) => !existingIds.has(chunk.id)),
+    ].slice(0, Math.max(12, uploadedChunks.length));
   }
 
   if (contextChunks.length === 0 && webResults.length === 0) {
@@ -526,7 +661,7 @@ export async function POST(req: NextRequest) {
     ...history,
     {
       role: "user",
-      content: `Source excerpts for grounding:\n---\n${fullContext}\n---\n\n${entityTerms.length ? `Named entity constraint: Use evidence that explicitly mentions ${entityTerms.join(", ")} OR evidence from a deck/file whose overall context establishes ${entityTerms.join(", ")} as the client/prospect. Do not use proof points from unrelated clients. If the provided source excerpts do not answer the question for that entity, return no relevant content.\n\n` : ""}Question: ${query}`,
+      content: `Source excerpts for grounding:\n---\n${fullContext}\n---\n\n${uploadedFileNames.length ? `Uploaded document instruction: The user has attached/uploaded these document(s) for this request: ${uploadedFileNames.join(", ")}. Treat the excerpts from these uploaded files as the provided document content. If the user asks to analyze "this document", "this RFP", or "the uploaded document", analyze these uploaded files directly instead of saying no document was provided.\n\n` : ""}${entityTerms.length ? `Named entity constraint: Use evidence that explicitly mentions ${entityTerms.join(", ")} OR evidence from a deck/file whose overall context establishes ${entityTerms.join(", ")} as the client/prospect. Do not use proof points from unrelated clients. If the provided source excerpts do not answer the question for that entity, return no relevant content.\n\n` : ""}Question: ${query}`,
     },
   ];
 
@@ -539,7 +674,12 @@ export async function POST(req: NextRequest) {
     return text.includes("TimeoutError") || text.includes("aborted due to timeout") || text.includes("The operation was aborted");
   }
 
-  function fallbackSynthesis(): AIResponse {
+  function isRateLimitError(err: unknown): boolean {
+    const text = String(err).toLowerCase();
+    return text.includes("rate limit") || text.includes("quota exceeded") || text.includes("429");
+  }
+
+  function fallbackSynthesis(reason = "The full AI synthesis did not complete"): AIResponse {
     const docCitations = contextChunks.slice(0, 3).map((chunk) => ({
       sourceType: "rag" as const,
       file: chunk.fileName,
@@ -560,8 +700,8 @@ export async function POST(req: NextRequest) {
 
     return {
       answer: citations.length
-        ? "The full AI synthesis timed out, but these are the strongest retrieved internal and web signals for the request. Use the source links below to inspect the evidence directly."
-        : "The full AI synthesis timed out and no relevant source evidence was available.",
+        ? `${reason}, but these are the strongest retrieved internal and web signals for the request. Use the source links below to inspect the evidence directly.`
+        : `${reason}, and no relevant source evidence was available.`,
       keyPoints,
       metrics: [],
       citations,
@@ -605,7 +745,7 @@ export async function POST(req: NextRequest) {
           // extractAIResponse handles all formats (raw JSON, markdown-fenced, partial, etc.)
           ...(aiProvider === "gemini" && { response_format: { type: "json_object" } }),
         }),
-        signal: AbortSignal.timeout(55_000),
+        signal: AbortSignal.timeout(35_000),
       });
       if (!res.ok) {
         const errBody = await res.text();
@@ -629,7 +769,13 @@ export async function POST(req: NextRequest) {
     }
   } catch (err) {
     if (isTimeoutError(err)) {
-      rawContent = JSON.stringify(fallbackSynthesis());
+      rawContent = JSON.stringify(fallbackSynthesis("The full AI synthesis timed out"));
+      fallbackCount++;
+      harnessTrace.push({ step: "synthesis", tool: "llm_synthesis", query, found: 0, status: "fallback", note: "Timed out; returned retrieved source evidence." });
+    } else if (isRateLimitError(err)) {
+      rawContent = JSON.stringify(fallbackSynthesis("The selected model hit a rate limit"));
+      fallbackCount++;
+      harnessTrace.push({ step: "synthesis", tool: "llm_synthesis", query, found: 0, status: "fallback", note: "Rate limited; returned retrieved source evidence." });
     } else {
       return NextResponse.json({ error: `AI request failed: ${err}` }, { status: 502 });
     }
@@ -692,6 +838,12 @@ export async function POST(req: NextRequest) {
   }
 
   const parsed = extractAIResponse(rawContent);
+  const slideGroupsFromAnswer: SlideSearchGroup[] = buildSlideGroupsFromChunks(contextChunks, intent);
+  const harnessWarnings = [
+    ...(harnessTrace.some((entry) => entry.step === "synthesis" && entry.status === "fallback") ? ["Model synthesis did not complete; response is source-evidence fallback."] : []),
+    ...(sourcesWillBeEmpty(parsed.citations) && contextChunks.length > 0 ? ["Model citations could not be mapped cleanly to retrieved internal sources."] : []),
+    ...(intent === "find_assets" && slideGroupsFromAnswer.length === 0 ? ["Query looks asset/slide-oriented but no PPTX slide candidates were found in answer retrieval."] : []),
+  ];
 
   // ── 6. Citations → Source objects ───────────────────────────────────────────
   const sources = parsed.citations
@@ -757,7 +909,32 @@ export async function POST(req: NextRequest) {
     })
   );
 
-  const totalTokens = (agentResult?.usedAgent ? agentResult.totalAgentTokens : 0) + synthesisTokens;
+  const totalTokens = agentTokens + synthesisTokens;
+  const toolsUsed = [
+    usedAgent ? "agentic_or_standard_agent" : "hybrid_rag",
+    ...(webResults.length ? ["web_search"] : []),
+    ...(slideGroupsFromAnswer.length ? ["slide_search"] : []),
+    "synthesis",
+  ];
+  const harness = buildAgentHarnessReport({
+    intent,
+    toolsUsed,
+    retrievedItems: contextChunks.length + webResults.length + slideGroupsFromAnswer.reduce((sum, group) => sum + group.slides.length, 0),
+    evidenceRefs: countCitationMarkers(parsed.answer) || parsed.citations.length,
+    fallbacks: fallbackCount,
+    warnings: harnessWarnings,
+    agentTrace: [
+      ...harnessTrace,
+      ...agentLog.map((entry) => ({
+        step: "tool",
+        tool: entry.tool,
+        query: entry.query,
+        found: entry.found,
+        status: "ok" as const,
+      })),
+      ...(slideGroupsFromAnswer.length ? [{ step: "retrieve", tool: "slide_search", query, found: slideGroupsFromAnswer.reduce((sum, group) => sum + group.slides.length, 0), status: "ok" as const }] : []),
+    ],
+  });
 
   return NextResponse.json({
     answer: parsed.answer,
@@ -765,9 +942,11 @@ export async function POST(req: NextRequest) {
     metrics: parsed.metrics,
     sources,
     documents,
+    slideGroups: slideGroupsFromAnswer,
+    harness,
     agentLog: agentLog.length ? agentLog : undefined,
     tokenUsage: {
-      agentTokens:     agentResult?.usedAgent ? agentResult.totalAgentTokens : 0,
+      agentTokens: usedAgent ? agentTokens : 0,
       synthesisTokens,
       totalTokens,
     },

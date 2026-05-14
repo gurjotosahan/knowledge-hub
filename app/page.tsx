@@ -1,18 +1,19 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { ServiceLine, Source, AppConfig, Document, DocumentCategory, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
+import { useRouter } from "next/navigation";
+import type { ServiceLine, Source, AppConfig, Document, DocumentCategory, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup, AgentHarnessReport } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
 import { aiAnswer } from "@/data/mockData";
 import Sidebar from "@/components/Sidebar";
+import DocumentBrowser from "@/components/DocumentBrowser";
 import ChatInput from "@/components/ChatInput";
 import Card from "@/components/Card";
 import PreviewPanel from "@/components/PreviewPanel";
 import LocalDocPreview, { type SlideDeck, type SlideDeckItem } from "@/components/LocalDocPreview";
 import Settings from "@/components/Settings";
-import DocumentBrowser from "@/components/DocumentBrowser";
-import ClientResearch from "@/components/ClientResearch";
 import SlideSearchResults from "@/components/SlideSearchResults";
+import ClientResearch from "@/components/ClientResearch";
 import {
   loadSessions,
   saveSession,
@@ -38,6 +39,11 @@ interface TokenUsage {
   totalTokens: number;
 }
 
+interface UploadedFileRef {
+  name: string;
+  path: string;
+}
+
 interface Turn {
   id: string;
   query: string;
@@ -49,6 +55,7 @@ interface Turn {
   docs?: Document[];
   slideGroups?: SlideSearchGroup[];
   slideTopicGroups?: SlideSearchTopicGroup[];
+  harness?: AgentHarnessReport;
   isLoading: boolean;
   agentLog?: AgentLogEntry[];
   tokenUsage?: TokenUsage;
@@ -125,6 +132,7 @@ const SUGGESTIONS = [
 ];
 
 export default function Page() {
+  const router = useRouter();
   // ── Config ────────────────────────────────────────────────────────────────
   const [config, setConfig]           = useState<AppConfig>(DEFAULT_CONFIG);
   const [showSettings, setShowSettings] = useState(false);
@@ -132,7 +140,7 @@ export default function Page() {
   useEffect(() => {
     const saved = localStorage.getItem(CONFIG_KEY);
     if (saved) {
-      try { setConfig(JSON.parse(saved)); } catch { /* ignore */ }
+      try { setConfig({ ...DEFAULT_CONFIG, ...JSON.parse(saved) }); } catch { /* ignore */ }
       return;
     }
     // No local config — pull server defaults so shared/tunnel users get the right setup
@@ -140,7 +148,7 @@ export default function Page() {
       .then((r) => r.json())
       .then((defaults) => {
         if (defaults.folderPath || defaults.aiProvider) {
-          setConfig((prev) => ({ ...prev, ...defaults }));
+          setConfig((prev) => ({ ...DEFAULT_CONFIG, ...prev, ...defaults }));
         }
       })
       .catch(() => { /* silently ignore — app still works in mock mode */ });
@@ -148,6 +156,7 @@ export default function Page() {
 
   const saveConfig = (next: AppConfig) => {
     const sanitized = {
+      ...DEFAULT_CONFIG,
       ...next,
       graphClientSecret: "",
       openrouterApiKey: "",
@@ -184,6 +193,7 @@ export default function Page() {
         docs:       stripDocsForStorage(t.docs),
         slideGroups: t.slideGroups,
         slideTopicGroups: t.slideTopicGroups,
+        harness:    t.harness,
         agentLog:   t.agentLog,
         tokenUsage: t.tokenUsage,
       })),
@@ -195,7 +205,7 @@ export default function Page() {
   const newSessionId = () => `session-${Date.now()}`;
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const [appMode,          setAppMode]          = useState<"knowledge" | "research">("knowledge");
+  const [appMode,          setAppMode]          = useState<"knowledge" | "clientResearch" | "rfpAnalyzer">("knowledge");
   const [selectedLine,     setSelectedLine]     = useState<ServiceLine | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<DocumentCategory | null>(null);
   const [selectedSource,   setSelectedSource]   = useState<Source | null>(null);
@@ -212,6 +222,7 @@ export default function Page() {
   const [uploadingContent, setUploadingContent] = useState(false);
   const [uploadStatus,     setUploadStatus]     = useState("");
   const [uploadFileNames,  setUploadFileNames]  = useState<string[]>([]);
+  const [uploadedFiles,    setUploadedFiles]    = useState<UploadedFileRef[]>([]);
   const [expandedRelatedDocs, setExpandedRelatedDocs] = useState<Set<string>>(new Set());
 
   // Keep a stable ref to activeSessionId so callbacks don't need it in deps
@@ -358,6 +369,7 @@ export default function Page() {
 
   // ── Search ────────────────────────────────────────────────────────────────
   const handleSearch = async (q: string) => {
+    if (searchAbortRef.current || isAnyLoading) return;
     setView("chat");
     setSelectedSource(null);
 
@@ -399,6 +411,8 @@ export default function Page() {
           query: q,
           conversationHistory: mode === "answer" ? conversationHistory : [],
           sourceKey,
+          uploadedFilePaths: uploadedFiles.map((file) => file.path),
+          uploadedFileNames: uploadedFiles.map((file) => file.name),
           searchMode,
           aiProvider:        config.aiProvider,
           ollamaBaseUrl:     config.ollamaBaseUrl,
@@ -407,6 +421,7 @@ export default function Page() {
           openrouterModel:   config.openrouterModel,
           geminiModel:       config.geminiModel,
           embeddingProvider: config.embeddingProvider,
+          useAgenticRag:     false,
         }),
       });
       clearTimeout(timer);
@@ -438,6 +453,7 @@ export default function Page() {
                   docs:        [],
                   slideGroups,
                   slideTopicGroups,
+                  harness:     data.harness,
                 }
               : {
                   ...t,
@@ -447,6 +463,8 @@ export default function Page() {
                   metrics:    data.metrics    ?? [],
                   sources:    data.sources    ?? [],
                   docs:       data.documents  ?? [],
+                  slideGroups: data.slideGroups ?? [],
+                  harness:    data.harness,
                   agentLog:   data.agentLog,
                   tokenUsage: data.tokenUsage,
                 }
@@ -459,10 +477,11 @@ export default function Page() {
       });
     } catch (err) {
       const aborted = (err instanceof DOMException && err.name === "AbortError");
+      const errorMessage = String(err).replace(/^Error:\s*/, "");
       setTurns((prev) =>
         prev.map((t) =>
           t.id === turnId
-            ? { ...t, isLoading: false, answer: aborted ? undefined : `Error: ${String(err)}`, keyPoints: [], metrics: [], sources: [], docs: [] }
+            ? { ...t, isLoading: false, answer: aborted ? "Request stopped." : `Error: ${errorMessage}`, keyPoints: [], metrics: [], sources: [], docs: [] }
             : t
         )
       );
@@ -493,6 +512,13 @@ export default function Page() {
       form.append("ollamaBaseUrl", config.ollamaBaseUrl);
       form.append("embedModel", config.ollamaEmbedModel);
       form.append("embeddingProvider", config.embeddingProvider);
+      form.append("enableAssetLlmEnrichment", String(config.enableAssetLlmEnrichment));
+      form.append("aiProvider", config.aiProvider);
+      form.append("ollamaModel", config.ollamaModel);
+      form.append("openrouterApiKey", config.openrouterApiKey);
+      form.append("openrouterModel", config.openrouterModel);
+      form.append("geminiApiKey", config.geminiApiKey);
+      form.append("geminiModel", config.geminiModel);
       if (config.sourceType === "local" && config.folderPath) {
         form.append("targetFolder", config.folderPath);
       }
@@ -508,6 +534,9 @@ export default function Page() {
       };
       setConfig(nextConfig);
       localStorage.setItem(CONFIG_KEY, JSON.stringify(nextConfig));
+      if (Array.isArray(data.uploadedFiles)) {
+        setUploadedFiles(data.uploadedFiles.filter((file: UploadedFileRef) => file?.path && file?.name));
+      }
       setUploadStatus(
         `Indexed ${data.indexedFiles ?? files.length} uploaded file${(data.indexedFiles ?? files.length) !== 1 ? "s" : ""}.`
       );
@@ -594,15 +623,20 @@ export default function Page() {
         activeSessionId={activeSessionId}
         onSelectSession={(id) => { handleSelectSession(id); setSidebarOpen(false); }}
         onDeleteSession={handleDeleteSession}
-        appMode={appMode}
-        onSetAppMode={setAppMode}
+        onSetAppMode={(mode) => setAppMode(mode)}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
 
       {/* Main */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {view === "source" ? (
+        {appMode === "clientResearch" ? (
+          <ClientResearch
+            config={config}
+            sourceKey={sourceKey}
+            onExitToHub={() => setAppMode("knowledge")}
+          />
+        ) : view === "source" ? (
           <DocumentBrowser
             rootFolder={config.folderPath}
             sourceType={config.sourceType}
@@ -619,6 +653,13 @@ export default function Page() {
             onOpenSettings={() => setShowSettings(true)}
             ollamaBaseUrl={config.ollamaBaseUrl}
             ollamaEmbedModel={config.ollamaEmbedModel}
+            enableAssetLlmEnrichment={config.enableAssetLlmEnrichment}
+            aiProvider={config.aiProvider}
+            ollamaModel={config.ollamaModel}
+            openrouterApiKey={config.openrouterApiKey}
+            openrouterModel={config.openrouterModel}
+            geminiApiKey={config.geminiApiKey}
+            geminiModel={config.geminiModel}
           />
         ) : (
           <div className="flex flex-col h-full overflow-hidden">
@@ -664,13 +705,8 @@ export default function Page() {
               </button>
             </div>
 
-            {/* ── Client Research mode ──────────────────────────────────── */}
-            {appMode === "research" && (
-              <ClientResearch config={config} />
-            )}
-
             {/* ── Knowledge Hub chat ───────────────────────────────────── */}
-            <div className={`flex-1 overflow-y-auto${appMode !== "knowledge" ? " hidden" : ""}`}>
+            <div className="flex-1 overflow-y-auto">
               {turns.length === 0 ? (
                 /* ── Landing / empty state ── */
                 <div className="max-w-2xl mx-auto px-4 md:px-6 flex flex-col items-center justify-center h-full gap-8 pb-24">
@@ -683,40 +719,54 @@ export default function Page() {
                     </div>
                     <h1 className="text-2xl font-bold text-slate-800">Apexon Knowledge Hub</h1>
 
-                    {/* ── Mode toggle — center stage ── */}
-                    <div className="flex gap-2 p-1.5 bg-slate-100 rounded-2xl shadow-inner">
+                    <div className="mt-2 flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
                       <button
+                        type="button"
                         onClick={() => setAppMode("knowledge")}
-                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
                           appMode === "knowledge"
-                            ? "bg-white text-slate-800 shadow-md"
+                            ? "bg-white text-sky-700 shadow-sm"
                             : "text-slate-500 hover:text-slate-700"
                         }`}
                       >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M21 21l-4.35-4.35M11 5a6 6 0 100 12 6 6 0 000-12z" />
                         </svg>
-                        Knowledge Hub
+                        Knowledge Search
                       </button>
                       <button
-                        onClick={() => setAppMode("research")}
-                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
-                          appMode === "research"
-                            ? "bg-white text-slate-800 shadow-md"
+                        type="button"
+                        onClick={() => setAppMode("clientResearch")}
+                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
+                          appMode === "clientResearch" as typeof appMode
+                            ? "bg-white text-sky-700 shadow-sm"
                             : "text-slate-500 hover:text-slate-700"
                         }`}
                       >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M10 9h3m-3 3h5" />
                         </svg>
                         Client Research
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => router.push("/rfp-analyzer")}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold text-slate-500 hover:text-sky-700 transition-all"
+                      >
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        RFP Analyzer
                       </button>
                     </div>
 
                     <p className="text-sm text-slate-500">
-                      {appMode === "research"
-                        ? "Generate structured presales intelligence for any prospect"
-                        : isLocalMode
+                      {isLocalMode
                         ? "Search your documents — ask follow-up questions in the same conversation"
                         : "AI-powered search across RFPs, POVs, and case studies"}
                     </p>
@@ -960,6 +1010,48 @@ export default function Page() {
                                 />
                               )}
 
+                              {turn.harness && (
+                                <details className={`rounded-xl border px-3 py-2.5 ${
+                                  turn.harness.status === "pass"
+                                    ? "border-emerald-100 bg-emerald-50"
+                                    : "border-amber-100 bg-amber-50"
+                                }`}>
+                                  <summary className="cursor-pointer list-none text-xs font-semibold text-slate-700">
+                                    Agent harness · {turn.harness.status === "pass" ? "Ready" : "Needs review"} · {turn.harness.intent}
+                                  </summary>
+                                  <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+                                    <div className="rounded-lg bg-white/80 px-2 py-1.5">
+                                      <p className="text-sm font-semibold text-slate-800">{turn.harness.retrievedItems}</p>
+                                      <p className="text-[9px] uppercase tracking-wide text-slate-400">Retrieved</p>
+                                    </div>
+                                    <div className="rounded-lg bg-white/80 px-2 py-1.5">
+                                      <p className="text-sm font-semibold text-slate-800">{turn.harness.evidenceRefs}</p>
+                                      <p className="text-[9px] uppercase tracking-wide text-slate-400">Evidence</p>
+                                    </div>
+                                    <div className="rounded-lg bg-white/80 px-2 py-1.5">
+                                      <p className="text-sm font-semibold text-slate-800">{turn.harness.fallbacks}</p>
+                                      <p className="text-[9px] uppercase tracking-wide text-slate-400">Fallbacks</p>
+                                    </div>
+                                  </div>
+                                  {turn.harness.warnings.length > 0 && (
+                                    <div className="mt-2 space-y-1">
+                                      {turn.harness.warnings.slice(0, 3).map((warning, i) => (
+                                        <p key={i} className="text-[11px] text-amber-800">- {warning}</p>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {turn.harness.agentTrace.length > 0 && (
+                                    <div className="mt-2 space-y-1 border-t border-white/70 pt-2">
+                                      {turn.harness.agentTrace.slice(0, 6).map((entry, i) => (
+                                        <p key={i} className="text-[11px] text-slate-500">
+                                          {entry.step} · {entry.tool}{entry.query ? ` · "${entry.query}"` : ""}{typeof entry.found === "number" ? ` -> ${entry.found}` : ""}
+                                        </p>
+                                      ))}
+                                    </div>
+                                  )}
+                                </details>
+                              )}
+
                               {/* Document cards */}
                               {(turn.docs?.length ?? 0) > 0 && (
                                 <div className="rounded-xl border border-slate-100 bg-slate-50/70">
@@ -1054,6 +1146,18 @@ export default function Page() {
                       </svg>
                       Find Slides
                     </button>
+                    <button
+                      onClick={() => setAppMode("clientResearch")}
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-slate-400 hover:text-slate-600 transition-all"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M10 9h3m-3 3h5" />
+                      </svg>
+                      Client Research
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
@@ -1110,9 +1214,10 @@ export default function Page() {
                   uploadDisabled={uploadingContent}
                   uploadFileNames={uploadFileNames}
                   isUploading={uploadingContent}
-                  onRemoveUploadFile={(index) =>
-                    setUploadFileNames((prev) => prev.filter((_, i) => i !== index))
-                  }
+                  onRemoveUploadFile={(index) => {
+                    setUploadFileNames((prev) => prev.filter((_, i) => i !== index));
+                    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+                  }}
                 />
               </div>
             </div>

@@ -30,6 +30,8 @@ export interface AppConfig {
   geminiApiKey: string;
   geminiModel: string;
   embeddingProvider: "ollama" | "google";
+  generateSlidePreviews: boolean;
+  enableAssetLlmEnrichment: boolean;
   // Web search
   tavilyApiKey: string;
 }
@@ -52,6 +54,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   geminiApiKey: "",
   geminiModel: "",
   embeddingProvider: "ollama",
+  generateSlidePreviews: false,
+  enableAssetLlmEnrichment: false,
   tavilyApiKey: "",
 };
 
@@ -152,6 +156,12 @@ export interface SlideSearchResult {
   excerpt: string;
   score?: number;
   confidence?: "High" | "Medium" | "Low";
+  thumbnailUrl?: string;
+  previewPdfUrl?: string;
+  previewStatus?: "thumbnail" | "pdf" | "failed";
+  assetYear?: number;
+  yearConfidence?: "high" | "medium" | "low";
+  recencyNote?: string;
 }
 
 export interface SlideSearchGroup {
@@ -166,6 +176,26 @@ export interface SlideSearchTopicGroup {
   topic: string;
   groups: SlideSearchGroup[];
   resultCount: number;
+}
+
+export interface AgentHarnessTraceEntry {
+  step: string;
+  tool: string;
+  query?: string;
+  found?: number;
+  status?: "ok" | "fallback" | "warning" | "error";
+  note?: string;
+}
+
+export interface AgentHarnessReport {
+  status: "pass" | "review" | "fail";
+  intent: string;
+  toolsUsed: string[];
+  retrievedItems: number;
+  evidenceRefs: number;
+  fallbacks: number;
+  warnings: string[];
+  agentTrace: AgentHarnessTraceEntry[];
 }
 
 export interface AIAnswer {

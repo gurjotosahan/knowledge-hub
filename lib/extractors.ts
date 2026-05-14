@@ -1,6 +1,7 @@
 // Server-side only — used exclusively in Next.js API routes (Node.js runtime)
 import { readFile } from "fs/promises";
 import { extname, basename } from "path";
+import { getOrderedPptxSlidePaths } from "@/lib/pptxOrder";
 import type { SearchableFileType } from "@/types";
 
 export interface ExtractedSlide {
@@ -78,20 +79,14 @@ async function extractPptxSlides(filePath: string): Promise<ExtractedSlide[]> {
   const JSZip = (await import("jszip")).default;
   const zip = await JSZip.loadAsync(buffer);
 
-  const slideKeys = Object.keys(zip.files)
-    .filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k))
-    .sort((a, b) => {
-      const na = parseInt(a.match(/\d+/)![0]);
-      const nb = parseInt(b.match(/\d+/)![0]);
-      return na - nb;
-    });
+  const slideKeys = await getOrderedPptxSlidePaths(zip);
 
   const slides: ExtractedSlide[] = [];
   for (let i = 0; i < slideKeys.length; i++) {
     const xml = await zip.files[slideKeys[i]].async("text");
     const parts: string[] = [];
-    Array.from(xml.matchAll(/<a:t[^>]*>([^<]+)<\/a:t>/g)).forEach((m) => {
-      const t = m[1].trim();
+    Array.from(xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)).forEach((m) => {
+      const t = cleanExtractedXmlText(m[1]);
       if (t) parts.push(t);
     });
     slides.push({ number: i + 1, text: parts.join(" ") });
@@ -109,6 +104,26 @@ function decodeXmlText(text: string): string {
     .replace(/&apos;/g, "'");
 }
 
+function cleanExtractedXmlText(text: string): string {
+  let cleaned = decodeXmlText(text);
+
+  for (let i = 0; i < 3; i++) {
+    const embeddedRuns = Array.from(cleaned.matchAll(/<(?:a|w):t[^>]*>([\s\S]*?)<\/(?:a|w):t>/g))
+      .map((match) => decodeXmlText(match[1]).trim())
+      .filter(Boolean);
+    if (embeddedRuns.length === 0) break;
+    cleaned = embeddedRuns.join(" ");
+  }
+
+  return cleaned
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\b(?:xmlns(?::\w+)?|[a-zA-Z]+:[a-zA-Z]+|[a-zA-Z]+)="[^"]*"/g, " ")
+    .replace(/\b(?:val|id|name|typeface|panose|pitchFamily|charset|lang|sz|kern|cap|spc|baseline|noProof|kumimoji|b|i|u|strike|x|y|cx|cy)="[^"]*"/g, " ")
+    .replace(/[<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function extractDocxSections(filePath: string): Promise<ExtractedSlide[]> {
   const buffer = await readFile(filePath);
   const JSZip = (await import("jszip")).default;
@@ -118,7 +133,7 @@ async function extractDocxSections(filePath: string): Promise<ExtractedSlide[]> 
 
   const paragraphs = Array.from(xml.matchAll(/<w:p[\s\S]*?<\/w:p>/g))
     .map((p) => Array.from(p[0].matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g))
-      .map((m) => decodeXmlText(m[1]))
+      .map((m) => cleanExtractedXmlText(m[1]))
       .join("")
       .replace(/\s+/g, " ")
       .trim())

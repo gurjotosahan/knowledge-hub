@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadIndex } from "@/lib/rag/indexer";
-import { getEmbedding, type AgentConfig } from "@/lib/rag/agent";
+import { getEmbedding, agenticRAG, type AgentConfig } from "@/lib/rag/agent";
 import { retrieve, type RetrievedChunk } from "@/lib/rag/retriever";
 import { ftsSearch, fetchFileParents } from "@/lib/rag/store";
 import { resolveAiConfig } from "@/lib/serverConfig";
+import { buildAgentHarnessReport, classifyAgentIntent, type AgentHarnessTraceEntry } from "@/lib/agentHarness";
+import { describeYear, extractYearMetadata, isRecencySensitiveQuery, normalizeAssetYear, recencyScore } from "@/lib/recency";
 import type { SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 
 export const maxDuration = 300;
@@ -19,6 +21,7 @@ interface SlideSearchBody {
   openrouterModel?: string;
   geminiModel?: string;
   embeddingProvider?: "ollama" | "google";
+  useAgenticRag?: boolean;
 }
 
 interface SlideCandidate extends SlideSearchResult {
@@ -41,9 +44,12 @@ interface AgenticSlideResponse {
 interface SearchProfile {
   terms: string[];
   focusTerms: string[];
+  canonicalFocusTerms: string[];
   topicPhrases: string[];
   wantsCaseStudy: boolean;
   wantsMetrics: boolean;
+  wantsAccelerator: boolean;
+  query: string;
 }
 
 const GENERIC_QUERY_TERMS = new Set([
@@ -67,6 +73,12 @@ const METRIC_MARKERS = [
   "improved", "efficiency", "productivity", "throughput", "accuracy", "payback",
 ];
 
+const ACCELERATOR_MARKERS = [
+  "accelerator", "accelerators", "alpha suite", "platformalpha", "platform alpha",
+  "cloudalpha", "cloud alpha", "domain accelerators", "technology accelerators",
+  "solution accelerators",
+];
+
 const DETAIL_MARKERS = [
   "what is", "overview", "at a glance", "approach", "architecture", "framework",
   "capabilities", "features", "benefits", "use case", "use cases", "workflow",
@@ -79,6 +91,46 @@ const LOW_INFORMATION_MARKERS = [
   "cover", "title", "contents",
 ];
 
+function localServeUrl(filePath?: string): string | undefined {
+  return filePath ? `/api/local/serve?path=${encodeURIComponent(filePath)}` : undefined;
+}
+
+const QUERY_TERM_CORRECTIONS: Record<string, string[]> = {
+  acceerator: ["accelerator"],
+  acceerators: ["accelerators"],
+  acceperstor: ["accelerator"],
+  acceperstors: ["accelerators"],
+  accelator: ["accelerator"],
+  accelators: ["accelerators"],
+  welle: ["wells"],
+  wells: ["wells"],
+  fargo: ["fargo"],
+  desing: ["design"],
+  desgin: ["design"],
+  thinkng: ["thinking"],
+  thinkngin: ["thinking"],
+  thiking: ["thinking"],
+  metodology: ["methodology"],
+  methodlogy: ["methodology"],
+  mthodlogy: ["methodology"],
+  methdology: ["methodology"],
+};
+
+const QUERY_TERM_EXPANSIONS: Record<string, string[]> = {
+  accelerator: ["accelerators"],
+  accelerators: ["accelerator"],
+  bank: ["banking", "bfsi", "financial", "finance"],
+  banking: ["bank", "bfsi", "financial", "finance"],
+  bfsi: ["bank", "banking", "financial", "finance"],
+  financial: ["bank", "banking", "bfsi", "finance"],
+  finance: ["bank", "banking", "bfsi", "financial"],
+  capability: ["capabilities", "practice", "practices", "credential", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
+  capabilities: ["capability", "practice", "practices", "credential", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
+  practice: ["capability", "capabilities", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
+  practices: ["capability", "capabilities", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
+  methodology: ["approach", "framework", "process", "steps", "phases", "activities"],
+};
+
 function queryTerms(query: string): string[] {
   return [
     ...new Set(
@@ -88,6 +140,18 @@ function queryTerms(query: string): string[] {
         .filter((term) => term.length > 1)
     ),
   ];
+}
+
+function expandQueryTerm(term: string): string[] {
+  const corrected = QUERY_TERM_CORRECTIONS[term] ?? [term];
+  const expanded = corrected.flatMap((candidate) => [candidate, ...(QUERY_TERM_EXPANSIONS[candidate] ?? [])]);
+  return [...new Set(expanded)];
+}
+
+function correctedTopicText(topicText: string): string {
+  return queryTerms(topicText)
+    .map((term) => QUERY_TERM_CORRECTIONS[term]?.[0] ?? term)
+    .join(" ");
 }
 
 function compact(text: string): string {
@@ -190,15 +254,26 @@ function makeSearchProfile(query: string): SearchProfile {
   const lower = query.toLowerCase();
   const wantsCaseStudy = /\b(case stud(?:y|ies)|customer stor(?:y|ies)|proof points?|examples?|references?|wins?)\b/.test(lower);
   const wantsMetrics = /\b(roi|saving|savings|cost|reduction|reduced|metrics?|outcomes?|impact|benefits?)\b/.test(lower);
-  const focusTerms = terms.filter((term) => !GENERIC_QUERY_TERMS.has(term));
+  const wantsAccelerator = /\b(accelerators?|alpha suite|platform\s*alpha|platformalpha|cloud\s*alpha|cloudalpha)\b/i.test(lower);
+  const canonicalFocusTerms = [
+    ...new Set(
+      terms
+        .filter((term) => !GENERIC_QUERY_TERMS.has(term))
+        .map((term) => QUERY_TERM_CORRECTIONS[term]?.[0] ?? term)
+    ),
+  ];
+  const focusTerms = [...new Set(canonicalFocusTerms.flatMap((term) => expandQueryTerm(term)))];
   const topicText = extractTopicText(query);
+  const correctedTopic = correctedTopicText(topicText);
   const topicPhrases = [
     topicText,
+    correctedTopic,
     compact(topicText),
+    compact(correctedTopic),
     focusTerms.join(" "),
     compact(focusTerms.join(" ")),
   ].filter((phrase, index, arr) => phrase.length > 1 && arr.indexOf(phrase) === index);
-  return { terms, focusTerms, topicPhrases, wantsCaseStudy, wantsMetrics };
+  return { terms, focusTerms, canonicalFocusTerms, topicPhrases, wantsCaseStudy, wantsMetrics, wantsAccelerator, query };
 }
 
 function countIncludes(text: string, markers: string[]): number {
@@ -219,6 +294,10 @@ function intentScore(text: string, profile: SearchProfile): number {
   if (profile.wantsMetrics) {
     score += Math.min(countIncludes(lower, METRIC_MARKERS), 4) * 0.7;
     if (hasMetric(text)) score += 1.2;
+  }
+  if (profile.wantsAccelerator) {
+    score += Math.min(countIncludes(lower, ACCELERATOR_MARKERS), 5) * 0.75;
+    if (/\b(\d+\+|suite|overview|domain|technology|platform|cloud)\b/i.test(text)) score += 0.7;
   }
   return score;
 }
@@ -253,6 +332,29 @@ function topicEvidenceScore(slideText: string, deckText: string, fileText: strin
   const deckFocusHits = profile.focusTerms.filter((term) => containsTerm(deckLower, term) || containsTerm(fileLower, term)).length;
   score += slideFocusHits * 1.3;
   score += deckFocusHits * 0.55;
+  return score;
+}
+
+function directTopicEvidenceScore(slideText: string, profile: SearchProfile): number {
+  const slideLower = slideText.toLowerCase();
+  const slideCompact = compact(slideText);
+  let score = 0;
+
+  for (const phrase of profile.topicPhrases) {
+    const isCompactPhrase = !phrase.includes(" ");
+    if (isCompactPhrase) {
+      if (phrase.length <= 3) {
+        if (containsTerm(slideText, phrase)) score += 4.5;
+      } else if (slideCompact.includes(phrase)) {
+        score += 4.5;
+      }
+    } else if (containsPhrase(slideLower, phrase)) {
+      score += 4;
+    }
+  }
+
+  const slideFocusHits = profile.focusTerms.filter((term) => containsTerm(slideLower, term)).length;
+  score += slideFocusHits * 1.3;
   return score;
 }
 
@@ -344,6 +446,8 @@ function rescoreCandidate(candidate: SlideCandidate, profile: SearchProfile): Sl
   const slideFocusHits = profile.focusTerms.filter((term) => containsTerm(slideText, term)).length;
   const deckFocusHits = profile.focusTerms.filter((term) => containsTerm(combinedDeckText, term)).length;
   const topicScore = topicEvidenceScore(candidate.rawText, candidate.deckText ?? "", fileText, profile);
+  const directTopicScore = directTopicEvidenceScore(candidate.rawText, profile);
+  const fileContextHits = profile.focusTerms.filter((term) => containsTerm(fileText, term)).length;
   const genericHits = profile.terms
     .filter((term) => GENERIC_QUERY_TERMS.has(term))
     .filter((term) => containsTerm(slideText, term) || containsTerm(combinedDeckText, term)).length;
@@ -351,18 +455,21 @@ function rescoreCandidate(candidate: SlideCandidate, profile: SearchProfile): Sl
   const slideIntent = intentScore(candidate.rawText, profile);
   const deckIntent = intentScore(combinedDeckText, profile) * 0.35;
   const depth = detailScore(candidate.rawText);
+  const recency = recencyScore(profile.query, candidate);
   const focusRequired = profile.focusTerms.length > 0;
-  const hasFocusContext = slideFocusHits > 0 || deckFocusHits > 0 || topicScore > 0;
+  const hasDirectFocusContext = slideFocusHits > 0 || directTopicScore > 0;
 
   let score = (candidate.score ?? 0) * 0.35;
   score += topicScore;
   score += slideFocusHits * 0.9;
-  score += deckFocusHits * 0.35;
+  score += deckFocusHits * 0.12;
+  score += Math.min(fileContextHits, 3) * Math.min(slideFocusHits, 2) * 0.7;
   score += Math.min(genericHits, 3) * 0.04;
   score += depth * 1.3;
   score += slideIntent + deckIntent;
+  score += recency * (isRecencySensitiveQuery(profile.query) ? 1.2 : 2.3);
 
-  if (focusRequired && !hasFocusContext) score = -10;
+  if (focusRequired && !hasDirectFocusContext) score = -10;
   if (depth < 0.8) score -= 2;
   if (profile.wantsCaseStudy && slideIntent === 0) score -= 2.2;
   if (profile.wantsMetrics && !hasMetric(candidate.rawText)) score -= 0.8;
@@ -371,6 +478,7 @@ function rescoreCandidate(candidate: SlideCandidate, profile: SearchProfile): Sl
     ...candidate,
     score,
     reason: makeReason(candidate, profile),
+    recencyNote: recency > 0.7 ? `Recent ${describeYear(candidate) ?? "asset"} boosted this result.` : undefined,
     excerpt: makeExcerpt(
       candidate.rawText,
       profile.topicPhrases.length ? profile.topicPhrases : profile.focusTerms.length ? profile.focusTerms : profile.terms
@@ -386,6 +494,7 @@ async function toSlideCandidates(chunks: RetrievedChunk[], query: string, source
     if (chunk.fileType !== "pptx" || !chunk.filePath || !chunk.page) continue;
 
     const key = `${chunk.filePath}::${chunk.page}`;
+    const yearMetadata = extractYearMetadata(chunk.text, `${chunk.fileName} ${chunk.filePath}`);
     const candidate: SlideCandidate = {
       filePath: chunk.filePath,
       fileTitle: chunk.fileName.replace(/\.pptx$/i, ""),
@@ -394,6 +503,11 @@ async function toSlideCandidates(chunks: RetrievedChunk[], query: string, source
       excerpt: "",
       score: chunk.score,
       rawText: chunk.text,
+      thumbnailUrl: localServeUrl(chunk.thumbnailPath),
+      previewPdfUrl: localServeUrl(chunk.previewPdfPath),
+      previewStatus: chunk.previewStatus,
+      assetYear: yearMetadata.assetYear ?? chunk.assetYear,
+      yearConfidence: yearMetadata.yearConfidence ?? chunk.yearConfidence,
     };
 
     const existing = bySlide.get(key);
@@ -435,6 +549,12 @@ function groupCandidates(candidates: SlideCandidate[], maxCandidates = 10): Slid
       excerpt: candidate.excerpt,
       score: candidate.score,
       confidence: confidenceForScore(candidate.score),
+      thumbnailUrl: candidate.thumbnailUrl,
+      previewPdfUrl: candidate.previewPdfUrl,
+      previewStatus: candidate.previewStatus,
+      assetYear: normalizeAssetYear(candidate.assetYear),
+      yearConfidence: candidate.yearConfidence,
+      recencyNote: candidate.recencyNote,
     });
   }
 
@@ -557,6 +677,8 @@ async function agenticRerankSlides(
     deck: candidate.fileTitle,
     slide: candidate.slideNumber,
     deterministicScore: Number((candidate.score ?? 0).toFixed(2)),
+    year: candidate.assetYear,
+    yearConfidence: candidate.yearConfidence,
     currentReason: candidate.reason,
     slideText: truncateForPrompt(candidate.rawText),
     deckContext: truncateForPrompt(candidate.deckText ?? "", 500),
@@ -589,9 +711,17 @@ Choose the slides that best answer the user's request. Return only the JSON obje
 }
 
 async function exactTopicChunks(sourceKey: string, profile: SearchProfile): Promise<RetrievedChunk[]> {
-  if (profile.focusTerms.length === 0) return [];
-  const ftsQuery = profile.focusTerms.join(" ");
-  const chunks = await ftsSearch(sourceKey, ftsQuery, 120).catch(() => []);
+  const queries = [
+    profile.canonicalFocusTerms.join(" "),
+    ...profile.topicPhrases.filter((phrase) => !phrase.includes(" ") || phrase.split(/\s+/).length <= 4),
+    ...profile.canonicalFocusTerms,
+  ].filter((query, index, arr) => query.trim().length > 1 && arr.indexOf(query) === index);
+  if (queries.length === 0) return [];
+
+  const results = await Promise.all(
+    queries.map((query) => ftsSearch(sourceKey, query, 80).catch(() => []))
+  );
+  const chunks = [...new Map(results.flat().map((chunk) => [chunk.id, chunk])).values()];
   return chunks
     .filter((chunk) => chunk.fileType === "pptx")
     .map((chunk) => ({ ...chunk, score: (chunk as RetrievedChunk).score ?? 0.8 }));
@@ -655,8 +785,37 @@ export async function POST(req: NextRequest) {
     ...body,
     ollamaEmbedModel: body.ollamaEmbedModel ?? indexMeta.embedModel,
   });
+  const intent = classifyAgentIntent(query);
+  const harnessTrace: AgentHarnessTraceEntry[] = [
+    { step: "intent", tool: "intent_classifier", query, found: 1, status: "ok", note: intent },
+  ];
+  let fallbackCount = 0;
 
-  const topics = decomposeSearchIntents(query);
+  let topics: string[];
+  let agenticInfo: { decomposition: string[]; synthesis: string } | undefined;
+
+  // Use Agentic RAG for better query decomposition and slide retrieval
+  if (body.useAgenticRag) {
+    console.log("[Slide Search] Using Agentic RAG for enhanced decomposition");
+    const agenticResult = await agenticRAG(query, agentConfig).catch(() => null);
+    if (agenticResult) {
+      topics = agenticResult.decomposition;
+      agenticInfo = {
+        decomposition: agenticResult.decomposition,
+        synthesis: agenticResult.synthesis,
+      };
+      console.log(`[Slide Search] Agentic decomposed into ${topics.length} topics`);
+      harnessTrace.push({ step: "plan", tool: "agentic_rag", query, found: topics.length, status: "ok", note: "Used agentic decomposition for slide topics." });
+    } else {
+      topics = decomposeSearchIntents(query);
+      fallbackCount++;
+      harnessTrace.push({ step: "plan", tool: "slide_intent_decomposer", query, found: topics.length, status: "fallback", note: "Agentic decomposition failed; used deterministic slide topic decomposition." });
+    }
+  } else {
+    topics = decomposeSearchIntents(query);
+    harnessTrace.push({ step: "plan", tool: "slide_intent_decomposer", query, found: topics.length, status: "ok" });
+  }
+
   const multiTopic = topics.length > 1;
   const perTopicLimit = multiTopic ? 3 : 10;
   const topicCandidates = await Promise.all(
@@ -666,10 +825,35 @@ export async function POST(req: NextRequest) {
     .map((candidates, index) => makeTopicGroup(topics[index], index, candidates, perTopicLimit))
     .filter((group) => group.resultCount > 0);
   const selectedCandidates = topicCandidates.flat().slice(0, 30);
+  const groups = groupCandidates(selectedCandidates, multiTopic ? 30 : 10);
+  const slideCount = groups.reduce((sum, group) => sum + group.slides.length, 0);
+  const harness = buildAgentHarnessReport({
+    intent: "find_assets",
+    toolsUsed: ["slide_search", ...(agenticInfo ? ["agentic_rag"] : [])],
+    retrievedItems: slideCount,
+    evidenceRefs: slideCount,
+    fallbacks: fallbackCount,
+    warnings: slideCount === 0 ? ["No PPTX slide candidates matched the query."] : [],
+    agentTrace: [
+      ...harnessTrace,
+      ...topics.map((topic, index) => ({
+        step: "retrieve",
+        tool: "slide_search",
+        query: topic,
+        found: topicCandidates[index]?.length ?? 0,
+        status: "ok" as const,
+        note: isRecencySensitiveQuery(topic)
+          ? `recency considered; best year ${topicCandidates[index]?.[0]?.assetYear ?? "unknown"} ${topicCandidates[index]?.[0]?.yearConfidence ?? ""}`.trim()
+          : undefined,
+      })),
+    ],
+  });
 
   return NextResponse.json({
     topics,
     topicGroups,
-    groups: groupCandidates(selectedCandidates, multiTopic ? 30 : 10),
+    groups,
+    harness,
+    ...(agenticInfo && { agenticInfo }),
   });
 }

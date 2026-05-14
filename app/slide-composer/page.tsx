@@ -2,9 +2,10 @@
 
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Link from "next/link";
-import type { AppConfig, SlideSearchGroup, SlideSearchResult } from "@/types";
+import type { AppConfig, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
 import PptxSlideView from "@/components/PptxSlideView";
+import PdfPageCanvas, { clearPdfCache } from "@/components/PdfPageCanvas";
 
 const CONFIG_KEY = "apexon-hub-config";
 
@@ -49,6 +50,12 @@ async function fetchTotalSlides(filePath: string): Promise<number> {
 
 // ── Slide thumbnail card ──────────────────────────────────────────────────────
 
+function confidenceCls(confidence?: SlideSearchResult["confidence"]): string {
+  if (confidence === "High") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (confidence === "Medium") return "bg-amber-50 text-amber-700 border-amber-200";
+  return "bg-slate-50 text-slate-500 border-slate-200";
+}
+
 function SlideThumbnail({
   filePath,
   slideNumber,
@@ -57,6 +64,7 @@ function SlideThumbnail({
   selected,
   onToggle,
   onPreview,
+  thumbnailUrl,
 }: {
   filePath: string;
   slideNumber: number;
@@ -65,6 +73,7 @@ function SlideThumbnail({
   selected?: boolean;
   onToggle?: () => void;
   onPreview?: () => void;
+  thumbnailUrl?: string;
 }) {
   return (
     <div
@@ -78,7 +87,16 @@ function SlideThumbnail({
         onClick={onPreview ?? onToggle}
         className="overflow-hidden rounded-t-xl bg-slate-100 cursor-pointer"
       >
-        <PptxSlideView filePath={filePath} slideNumber={slideNumber} displayWidth={displayWidth} />
+        {thumbnailUrl ? (
+          <img
+            src={thumbnailUrl}
+            alt={`Slide ${slideNumber}`}
+            style={{ width: displayWidth }}
+            className="block object-cover"
+          />
+        ) : (
+          <PptxSlideView filePath={filePath} slideNumber={slideNumber} displayWidth={displayWidth} />
+        )}
       </div>
 
       {/* footer */}
@@ -104,6 +122,78 @@ function SlideThumbnail({
   );
 }
 
+// ── Preview modal: converts PPTX → PDF on demand for pixel-accurate render ──
+function SlidePreviewModal({
+  filePath, slideNumber, onClose,
+}: { filePath: string; slideNumber: number; onClose: () => void }) {
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<"converting" | "ready" | "error">("converting");
+  const blobUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("converting");
+    fetch(`/api/local/pptx-to-pdf?path=${encodeURIComponent(filePath)}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        blobUrlRef.current = url;
+        setPdfUrl(url);
+        setStatus("ready");
+      })
+      .catch(() => { if (!cancelled) setStatus("error"); });
+
+    return () => {
+      cancelled = true;
+      if (blobUrlRef.current) {
+        clearPdfCache(blobUrlRef.current);
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
+  }, [filePath]);
+
+  const displayWidth = Math.min(900, (typeof window !== "undefined" ? window.innerWidth : 1200) - 80);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="relative rounded-2xl overflow-hidden shadow-2xl bg-white" onClick={(e) => e.stopPropagation()}>
+        {status === "ready" && pdfUrl ? (
+          <PdfPageCanvas fileUrl={pdfUrl} pageNumber={slideNumber} displayWidth={displayWidth} />
+        ) : (
+          <div style={{ width: displayWidth, height: Math.round(displayWidth * 9 / 16) }}
+               className="flex flex-col items-center justify-center bg-slate-100 gap-3">
+            {status === "converting" ? (
+              <>
+                <div className="w-8 h-8 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+                <span className="text-xs text-slate-500">Rendering slide…</span>
+              </>
+            ) : (
+              <>
+                <span className="text-sm text-slate-600 font-medium">Preview unavailable</span>
+                <span className="text-xs text-slate-400">PDF conversion failed — falling back to text-only view</span>
+                <div className="mt-2">
+                  <PptxSlideView filePath={filePath} slideNumber={slideNumber} displayWidth={displayWidth} />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SlideComposerPage() {
@@ -119,11 +209,13 @@ export default function SlideComposerPage() {
   const [staged, setStaged] = useState<StagedSlide[]>([]);
   const [composing, setComposing] = useState(false);
   const [composeError, setComposeError] = useState("");
+  const [engine, setEngine] = useState<"automizer" | "aspose" | "aspose-foss" | "zip">("automizer");
 
   // Search (right panel)
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<SlideSearchGroup[]>([]);
+  const [searchTopicGroups, setSearchTopicGroups] = useState<SlideSearchTopicGroup[]>([]);
   const [searchError, setSearchError] = useState("");
 
   // Preview modal
@@ -133,10 +225,32 @@ export default function SlideComposerPage() {
   const [leftTab, setLeftTab] = useState<"template" | "staged">("template");
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(CONFIG_KEY);
-      if (saved) setConfig({ ...DEFAULT_CONFIG, ...JSON.parse(saved) });
-    } catch {}
+    let cancelled = false;
+
+    const loadConfig = async () => {
+      let nextConfig = DEFAULT_CONFIG;
+
+      try {
+        const saved = localStorage.getItem(CONFIG_KEY);
+        if (saved) nextConfig = { ...DEFAULT_CONFIG, ...JSON.parse(saved) };
+      } catch {}
+
+      try {
+        const res = await fetch("/api/config/defaults");
+        if (res.ok) {
+          const defaults = await res.json();
+          const nonEmptyDefaults = Object.fromEntries(
+            Object.entries(defaults).filter(([, value]) => value !== "")
+          );
+          nextConfig = { ...nextConfig, ...nonEmptyDefaults };
+        }
+      } catch {}
+
+      if (!cancelled) setConfig(nextConfig);
+    };
+
+    loadConfig();
+    return () => { cancelled = true; };
   }, []);
 
   // ── Template upload ──────────────────────────────────────────────────────────
@@ -230,6 +344,7 @@ export default function SlideComposerPage() {
     setSearching(true);
     setSearchError("");
     setSearchResults([]);
+    setSearchTopicGroups([]);
     try {
       const res = await fetch("/api/ai/slide-search", {
         method: "POST",
@@ -250,6 +365,7 @@ export default function SlideComposerPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Search failed");
       setSearchResults(data.groups ?? []);
+      setSearchTopicGroups(data.topicGroups ?? []);
     } catch (err) {
       setSearchError(String(err));
     } finally {
@@ -271,6 +387,7 @@ export default function SlideComposerPage() {
           templatePath: template.path,
           slides: staged.map((s) => ({ filePath: s.filePath, slideNumber: s.slideNumber })),
           title: template.name.replace(/\.pptx$/i, ""),
+          engine,
         }),
       });
       if (!res.ok) {
@@ -482,6 +599,42 @@ export default function SlideComposerPage() {
 
                 {/* Compose footer */}
                 <div className="border-t border-slate-100 px-4 py-3 shrink-0">
+                  {/* Engine selector */}
+                  <div className="mb-2.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Merge engine</p>
+                    <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 border border-slate-200">
+                      {([
+                        { id: "automizer",   label: "Automizer",   hint: "Default" },
+                        { id: "aspose",      label: "Aspose",      hint: "Highest fidelity · uses license if ASPOSE_LICENSE_PATH is set" },
+                        { id: "aspose-foss", label: "Aspose FOSS", hint: "MIT open-source · no watermark · slides hosted in template master" },
+                        { id: "zip",         label: "ZIP",         hint: "Manual merger · no extra deps" },
+                      ] as const).map((opt) => (
+                        <button
+                          key={opt.id}
+                          onClick={() => setEngine(opt.id)}
+                          title={opt.hint}
+                          className={`flex-1 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                            engine === opt.id
+                              ? "bg-white text-slate-700 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    {engine === "aspose" && (
+                      <p className="mt-1.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
+                        Free tier inserts a watermark slide. Set <code>ASPOSE_LICENSE_PATH</code> to remove.
+                      </p>
+                    )}
+                    {engine === "aspose-foss" && (
+                      <p className="mt-1.5 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded">
+                        MIT licensed · no watermark · slide content preserved, styled by template master.
+                      </p>
+                    )}
+                  </div>
+
                   {composeError && (
                     <p className="mb-2 text-xs text-red-500">{composeError}</p>
                   )}
@@ -569,76 +722,94 @@ export default function SlideComposerPage() {
             </div>
           )}
 
-          {searchResults.map((group) => (
-            <div key={group.filePath} className="rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="px-4 py-3 border-b border-slate-100">
-                <p className="text-sm font-semibold text-slate-800 truncate">{group.fileTitle}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{group.slides.length} result{group.slides.length !== 1 ? "s" : ""}</p>
-              </div>
-              <div className="divide-y divide-slate-100">
-                {group.slides.map((slide) => {
-                  const staged_already = isStaged(group.filePath, slide.slideNumber);
-                  return (
-                    <div key={slide.slideNumber} className="flex items-start gap-4 p-4">
-                      {/* Thumbnail */}
-                      <div className="shrink-0">
-                        <SlideThumbnail
-                          filePath={group.filePath}
-                          slideNumber={slide.slideNumber}
-                          displayWidth={280}
-                          label={`Slide ${slide.slideNumber}`}
-                          selected={staged_already}
-                          onToggle={() => {
-                            if (staged_already) {
-                              const s = staged.find(
-                                (x) => x.filePath === group.filePath && x.slideNumber === slide.slideNumber
-                              );
-                              if (s) removeFromStaged(s.id);
-                            } else {
-                              addToStaged(group, slide);
-                            }
-                          }}
-                          onPreview={() => setPreview({ filePath: group.filePath, slideNumber: slide.slideNumber })}
-                        />
-                      </div>
-                      {/* Reason text */}
-                      {slide.reason && (
-                        <p className="flex-1 text-sm text-slate-500 leading-relaxed pt-1">{slide.reason}</p>
-                      )}
+          {(() => {
+            const hasTopics = searchTopicGroups.length > 0;
+            const topics = hasTopics
+              ? searchTopicGroups
+              : [{ id: "all", topic: "", groups: searchResults, resultCount: searchResults.reduce((s, g) => s + g.slides.length, 0) }];
+
+            return topics.map((topicGroup) => (
+              <div key={topicGroup.id} className="space-y-3">
+                {hasTopics && (
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
+                    <span className="text-xs font-semibold text-slate-700">Topic: {topicGroup.topic}</span>
+                    <span className="ml-auto shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[10px] font-semibold text-slate-500">
+                      {topicGroup.resultCount} result{topicGroup.resultCount !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                )}
+                {topicGroup.groups.map((group) => (
+                  <div key={group.filePath} className="rounded-xl border border-slate-200 bg-white shadow-sm">
+                    <div className="px-4 py-3 border-b border-slate-100">
+                      <p className="text-sm font-semibold text-slate-800 truncate">{group.fileTitle}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{group.slides.length} result{group.slides.length !== 1 ? "s" : ""}</p>
                     </div>
-                  );
-                })}
+                    <div className="divide-y divide-slate-100">
+                      {group.slides.map((slide) => {
+                        const staged_already = isStaged(group.filePath, slide.slideNumber);
+                        return (
+                          <div key={slide.slideNumber} className="flex items-start gap-4 p-4">
+                            <div className="shrink-0">
+                              <SlideThumbnail
+                                filePath={group.filePath}
+                                slideNumber={slide.slideNumber}
+                                displayWidth={200}
+                                label={`Slide ${slide.slideNumber}`}
+                                thumbnailUrl={slide.thumbnailUrl}
+                                selected={staged_already}
+                                onToggle={() => {
+                                  if (staged_already) {
+                                    const s = staged.find(
+                                      (x) => x.filePath === group.filePath && x.slideNumber === slide.slideNumber
+                                    );
+                                    if (s) removeFromStaged(s.id);
+                                  } else {
+                                    addToStaged(group, slide);
+                                  }
+                                }}
+                                onPreview={() => setPreview({ filePath: group.filePath, slideNumber: slide.slideNumber })}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0 pt-1 space-y-1.5">
+                              <div className="flex items-start gap-1.5 flex-wrap">
+                                {slide.assetYear && (
+                                  <span className="shrink-0 rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
+                                    {slide.yearConfidence === "low" ? `${slide.assetYear} inferred` : slide.assetYear}
+                                  </span>
+                                )}
+                                <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${confidenceCls(slide.confidence)}`}>
+                                  {slide.confidence ?? "Low"}
+                                </span>
+                              </div>
+                              {slide.reason && (
+                                <p className="text-sm text-slate-600 leading-relaxed">{slide.reason}</p>
+                              )}
+                              {slide.recencyNote && (
+                                <p className="text-[11px] font-medium text-sky-700">{slide.recencyNote}</p>
+                              )}
+                              {slide.excerpt && (
+                                <p className="text-xs leading-5 text-slate-400 line-clamp-2">{slide.excerpt}</p>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          ))}
+            ));
+          })()}
         </div>
       </div>
 
       {/* ── Slide preview modal ──────────────────────────────────────────────── */}
       {preview && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          onClick={() => setPreview(null)}
-        >
-          <div
-            className="relative rounded-2xl overflow-hidden shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <PptxSlideView
-              filePath={preview.filePath}
-              slideNumber={preview.slideNumber}
-              displayWidth={Math.min(900, (typeof window !== "undefined" ? window.innerWidth : 1200) - 80)}
-            />
-            <button
-              onClick={() => setPreview(null)}
-              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
+        <SlidePreviewModal
+          filePath={preview.filePath}
+          slideNumber={preview.slideNumber}
+          onClose={() => setPreview(null)}
+        />
       )}
     </div>
   );
