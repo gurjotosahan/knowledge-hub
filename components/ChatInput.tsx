@@ -57,9 +57,24 @@ export default function ChatInput({
     e.preventDefault();
     const file = imageItem.getAsFile();
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setPastedImage(ev.target?.result as string);
-    reader.readAsDataURL(file);
+
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      // Resize to max 1024px on the longest side to keep base64 payload small
+      const MAX = 1024;
+      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0, w, h);
+      setPastedImage(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.src = objectUrl;
   };
 
   const handleUpload = (files: FileList | null) => {
