@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SlideData } from "@/types";
 import SlideRenderer from "./SlideRenderer";
 import PdfPageCanvas from "./PdfPageCanvas";
-import PptxSlideView from "./PptxSlideView";
+import PptxPdfView from "./PptxPdfView";
 
 // SlideRenderer design canvas
 const DESIGN_W = 640;
@@ -146,7 +146,7 @@ export default function SlideModal({
 
           {content.kind === "pptx-view" && (
             <div style={{ width: "100%", height: "100%" }}>
-              <PptxSlideView
+              <PptxPdfView
                 filePath={content.filePath}
                 slideNumber={content.slideNumber}
                 displayWidth={renderWidth}

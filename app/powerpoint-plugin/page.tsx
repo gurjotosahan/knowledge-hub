@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppConfig, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
-import PptxSlideView from "@/components/PptxSlideView";
+import PptxPdfView from "@/components/PptxPdfView";
 
 const CONFIG_KEY = "apexon-hub-config";
 
@@ -295,7 +295,7 @@ export default function PowerPointPluginPage() {
                                   onClick={() => setPreview({ filePath: group.filePath, slideNumber: slide.slideNumber })}
                                   className="block w-full"
                                 >
-                                  <PptxSlideView filePath={group.filePath} slideNumber={slide.slideNumber} displayWidth={360} />
+                                  <PptxPdfView filePath={group.filePath} slideNumber={slide.slideNumber} displayWidth={360} />
                                 </button>
                               </div>
                               <div className="flex items-start justify-between gap-2">
@@ -381,7 +381,7 @@ export default function PowerPointPluginPage() {
           onClick={() => setPreview(null)}
         >
           <div className="relative overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <PptxSlideView
+            <PptxPdfView
               filePath={preview.filePath}
               slideNumber={preview.slideNumber}
               displayWidth={Math.min(900, (typeof window !== "undefined" ? window.innerWidth : 960) - 48)}
