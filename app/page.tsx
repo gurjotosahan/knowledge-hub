@@ -47,6 +47,7 @@ interface UploadedFileRef {
 interface Turn {
   id: string;
   query: string;
+  imageDataUrl?: string;
   mode?: "answer" | "slides";
   answer?: string;
   keyPoints?: string[];
@@ -390,7 +391,7 @@ export default function Page() {
       ]);
 
     const mode = queryMode;
-    setTurns((prev) => [...prev, { id: turnId, query: q, mode, isLoading: true }]);
+    setTurns((prev) => [...prev, { id: turnId, query: q, imageDataUrl, mode, isLoading: true }]);
 
     if (!isLocalMode) {
       setTurns((prev) =>
@@ -806,8 +807,18 @@ export default function Page() {
 
                       {/* User message */}
                       <div className="flex justify-end">
-                        <div className="max-w-[75%] bg-slate-100 rounded-2xl rounded-br-sm px-4 py-3">
-                          <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{turn.query}</p>
+                        <div className="max-w-[75%] bg-slate-100 rounded-2xl rounded-br-sm px-4 py-3 flex flex-col gap-2">
+                          {turn.imageDataUrl && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={turn.imageDataUrl}
+                              alt="Attached image"
+                              className="max-h-48 rounded-xl object-contain self-end"
+                            />
+                          )}
+                          {turn.query && (
+                            <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{turn.query}</p>
+                          )}
                         </div>
                       </div>
 
