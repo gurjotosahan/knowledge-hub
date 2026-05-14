@@ -368,7 +368,7 @@ export default function Page() {
   };
 
   // ── Search ────────────────────────────────────────────────────────────────
-  const handleSearch = async (q: string) => {
+  const handleSearch = async (q: string, imageDataUrl?: string) => {
     if (searchAbortRef.current || isAnyLoading) return;
     setView("chat");
     setSelectedSource(null);
@@ -413,6 +413,7 @@ export default function Page() {
           sourceKey,
           uploadedFilePaths: uploadedFiles.map((file) => file.path),
           uploadedFileNames: uploadedFiles.map((file) => file.name),
+          imageDataUrl,
           searchMode,
           aiProvider:        config.aiProvider,
           ollamaBaseUrl:     config.ollamaBaseUrl,

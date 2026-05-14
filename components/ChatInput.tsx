@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 
 interface ChatInputProps {
-  onSend: (query: string) => void;
+  onSend: (query: string, imageDataUrl?: string) => void;
   onStop?: () => void;
   onUploadFiles?: (files: FileList) => void;
   isLoading?: boolean;
@@ -27,6 +27,7 @@ export default function ChatInput({
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [pastedImage, setPastedImage] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
   const pptInputRef = useRef<HTMLInputElement>(null);
@@ -41,10 +42,24 @@ export default function ChatInput({
 
   const send = () => {
     const q = value.trim();
-    if (!q || isLoading || disabled || isUploading) return;
-    onSend(q);
+    if ((!q && !pastedImage) || isLoading || disabled || isUploading) return;
+    onSend(q, pastedImage ?? undefined);
     setValue("");
+    setPastedImage(null);
     if (ref.current) ref.current.style.height = "auto";
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageItem = Array.from(e.clipboardData.items).find((item) =>
+      item.type.startsWith("image/")
+    );
+    if (!imageItem) return;
+    e.preventDefault();
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setPastedImage(ev.target?.result as string);
+    reader.readAsDataURL(file);
   };
 
   const handleUpload = (files: FileList | null) => {
@@ -99,6 +114,26 @@ export default function ChatInput({
           e.currentTarget.value = "";
         }}
       />
+      {pastedImage && (
+        <div className="relative w-fit">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={pastedImage}
+            alt="Pasted image"
+            className="h-20 rounded-xl border border-slate-200 object-cover"
+          />
+          <button
+            type="button"
+            onClick={() => setPastedImage(null)}
+            className="absolute -right-1.5 -top-1.5 w-5 h-5 rounded-full bg-slate-900 text-white flex items-center justify-center hover:bg-slate-700 transition-colors"
+            aria-label="Remove image"
+          >
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
       {uploadFileNames.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           {uploadFileNames.slice(0, 3).map((name, index) => {
@@ -194,7 +229,8 @@ export default function ChatInput({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
           }}
-          placeholder={isLoading ? "Searching…" : "Ask anything about your documents…"}
+          onPaste={handlePaste}
+          placeholder={isLoading ? "Searching…" : "Ask anything… or paste a screenshot"}
           rows={1}
           disabled={disabled || isLoading}
           className="flex-1 resize-none bg-transparent text-sm text-slate-700 placeholder-slate-400 focus:outline-none leading-[1.5] max-h-44 disabled:opacity-60 self-center"
@@ -214,7 +250,7 @@ export default function ChatInput({
         ) : (
           <button
             onClick={send}
-            disabled={!value.trim() || isLoading || disabled || isUploading}
+            disabled={(!value.trim() && !pastedImage) || isLoading || disabled || isUploading}
             className="shrink-0 w-9 h-9 rounded-full bg-sky-600 hover:bg-sky-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-colors"
             aria-label="Send"
           >

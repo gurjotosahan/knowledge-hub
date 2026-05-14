@@ -44,6 +44,7 @@ interface QueryBody {
   useAgenticRag?: boolean; // Enable agentic RAG pipeline
   uploadedFilePaths?: string[];
   uploadedFileNames?: string[];
+  imageDataUrl?: string;
 }
 
 interface AICitation {
@@ -656,13 +657,21 @@ export async function POST(req: NextRequest) {
 
   const systemPrompt = webResults.length > 0 ? MIXED_SYSTEM_PROMPT : SYSTEM_PROMPT;
   const history = (body.conversationHistory ?? []).slice(-6);
+  const imageDataUrl = body.imageDataUrl ?? null;
+
+  const userText = `Source excerpts for grounding:\n---\n${fullContext}\n---\n\n${imageDataUrl ? "The user has attached an image (screenshot or diagram). Analyze it alongside the document excerpts to answer the question.\n\n" : ""}${uploadedFileNames.length ? `Uploaded document instruction: The user has attached/uploaded these document(s) for this request: ${uploadedFileNames.join(", ")}. Treat the excerpts from these uploaded files as the provided document content. If the user asks to analyze "this document", "this RFP", or "the uploaded document", analyze these uploaded files directly instead of saying no document was provided.\n\n` : ""}${entityTerms.length ? `Named entity constraint: Use evidence that explicitly mentions ${entityTerms.join(", ")} OR evidence from a deck/file whose overall context establishes ${entityTerms.join(", ")} as the client/prospect. Do not use proof points from unrelated clients. If the provided source excerpts do not answer the question for that entity, return no relevant content.\n\n` : ""}Question: ${query}`;
+
+  const userContent = imageDataUrl
+    ? [
+        { type: "image_url", image_url: { url: imageDataUrl } },
+        { type: "text", text: userText },
+      ]
+    : userText;
+
   const messages = [
     { role: "system", content: systemPrompt },
     ...history,
-    {
-      role: "user",
-      content: `Source excerpts for grounding:\n---\n${fullContext}\n---\n\n${uploadedFileNames.length ? `Uploaded document instruction: The user has attached/uploaded these document(s) for this request: ${uploadedFileNames.join(", ")}. Treat the excerpts from these uploaded files as the provided document content. If the user asks to analyze "this document", "this RFP", or "the uploaded document", analyze these uploaded files directly instead of saying no document was provided.\n\n` : ""}${entityTerms.length ? `Named entity constraint: Use evidence that explicitly mentions ${entityTerms.join(", ")} OR evidence from a deck/file whose overall context establishes ${entityTerms.join(", ")} as the client/prospect. Do not use proof points from unrelated clients. If the provided source excerpts do not answer the question for that entity, return no relevant content.\n\n` : ""}Question: ${query}`,
-    },
+    { role: "user", content: userContent },
   ];
 
   // ── 4. Synthesize — single structured LLM call ──────────────────────────────
