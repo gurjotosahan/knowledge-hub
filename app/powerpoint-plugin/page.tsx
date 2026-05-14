@@ -236,7 +236,7 @@ export default function PowerPointPluginPage() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={config.folderPath ? "Search topics or slide intents..." : "Configure folder in Knowledge Hub"}
+                placeholder={config.folderPath ? "Search topics or slide intents..." : "Configure folder in Apexon KM360"}
                 disabled={!config.folderPath}
                 className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:opacity-50"
               />

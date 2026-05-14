@@ -208,7 +208,7 @@ async function callLLMWithTools(
     headers: {
       "Content-Type": "application/json",
       Authorization: auth ?? "",
-      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon Knowledge Hub" }),
+      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon KM360" }),
     },
     body: JSON.stringify({ model, messages, ...(tools.length && { tools, tool_choice: "auto" }) }),
     signal: AbortSignal.timeout(120_000),
@@ -269,7 +269,7 @@ async function callLLMStreamingText(
     headers: {
       "Content-Type": "application/json",
       Authorization: auth ?? "",
-      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon Knowledge Hub" }),
+      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon KM360" }),
     },
     body: JSON.stringify({ model, messages, stream: true }),
     signal: AbortSignal.timeout(120_000),

@@ -36,7 +36,7 @@ async function callLLM(messages: object[], config: AgentConfig): Promise<string>
     headers: {
       "Content-Type": "application/json",
       Authorization: auth ?? "",
-      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon Knowledge Hub" }),
+      ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon KM360" }),
     },
     body: JSON.stringify({ model, messages }),
     signal: AbortSignal.timeout(90_000),

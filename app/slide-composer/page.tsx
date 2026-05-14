@@ -6,6 +6,7 @@ import type { AppConfig, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGr
 import { DEFAULT_CONFIG } from "@/types";
 import PptxSlideView from "@/components/PptxSlideView";
 import PdfPageCanvas, { clearPdfCache } from "@/components/PdfPageCanvas";
+import SlideSearchResults from "@/components/SlideSearchResults";
 
 const CONFIG_KEY = "apexon-hub-config";
 
@@ -50,11 +51,6 @@ async function fetchTotalSlides(filePath: string): Promise<number> {
 
 // ── Slide thumbnail card ──────────────────────────────────────────────────────
 
-function confidenceCls(confidence?: SlideSearchResult["confidence"]): string {
-  if (confidence === "High") return "bg-emerald-50 text-emerald-700 border-emerald-200";
-  if (confidence === "Medium") return "bg-amber-50 text-amber-700 border-amber-200";
-  return "bg-slate-50 text-slate-500 border-slate-200";
-}
 
 function SlideThumbnail({
   filePath,
@@ -425,7 +421,7 @@ export default function SlideComposerPage() {
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          Knowledge Hub
+          Apexon KM360
         </Link>
       </div>
 
@@ -688,7 +684,7 @@ export default function SlideComposerPage() {
           </form>
           {!config.folderPath && (
             <p className="mt-1.5 text-xs text-amber-600">
-              Open Settings in the main Knowledge Hub to configure your document folder.
+              Open Settings in the main Apexon KM360 to configure your document folder.
             </p>
           )}
         </div>
@@ -722,84 +718,26 @@ export default function SlideComposerPage() {
             </div>
           )}
 
-          {(() => {
-            const hasTopics = searchTopicGroups.length > 0;
-            const topics = hasTopics
-              ? searchTopicGroups
-              : [{ id: "all", topic: "", groups: searchResults, resultCount: searchResults.reduce((s, g) => s + g.slides.length, 0) }];
-
-            return topics.map((topicGroup) => (
-              <div key={topicGroup.id} className="space-y-3">
-                {hasTopics && (
-                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
-                    <span className="text-xs font-semibold text-slate-700">Topic: {topicGroup.topic}</span>
-                    <span className="ml-auto shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[10px] font-semibold text-slate-500">
-                      {topicGroup.resultCount} result{topicGroup.resultCount !== 1 ? "s" : ""}
-                    </span>
-                  </div>
-                )}
-                {topicGroup.groups.map((group) => (
-                  <div key={group.filePath} className="rounded-xl border border-slate-200 bg-white shadow-sm">
-                    <div className="px-4 py-3 border-b border-slate-100">
-                      <p className="text-sm font-semibold text-slate-800 truncate">{group.fileTitle}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">{group.slides.length} result{group.slides.length !== 1 ? "s" : ""}</p>
-                    </div>
-                    <div className="divide-y divide-slate-100">
-                      {group.slides.map((slide) => {
-                        const staged_already = isStaged(group.filePath, slide.slideNumber);
-                        return (
-                          <div key={slide.slideNumber} className="flex items-start gap-4 p-4">
-                            <div className="shrink-0">
-                              <SlideThumbnail
-                                filePath={group.filePath}
-                                slideNumber={slide.slideNumber}
-                                displayWidth={200}
-                                label={`Slide ${slide.slideNumber}`}
-                                thumbnailUrl={slide.thumbnailUrl}
-                                selected={staged_already}
-                                onToggle={() => {
-                                  if (staged_already) {
-                                    const s = staged.find(
-                                      (x) => x.filePath === group.filePath && x.slideNumber === slide.slideNumber
-                                    );
-                                    if (s) removeFromStaged(s.id);
-                                  } else {
-                                    addToStaged(group, slide);
-                                  }
-                                }}
-                                onPreview={() => setPreview({ filePath: group.filePath, slideNumber: slide.slideNumber })}
-                              />
-                            </div>
-                            <div className="flex-1 min-w-0 pt-1 space-y-1.5">
-                              <div className="flex items-start gap-1.5 flex-wrap">
-                                {slide.assetYear && (
-                                  <span className="shrink-0 rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
-                                    {slide.yearConfidence === "low" ? `${slide.assetYear} inferred` : slide.assetYear}
-                                  </span>
-                                )}
-                                <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${confidenceCls(slide.confidence)}`}>
-                                  {slide.confidence ?? "Low"}
-                                </span>
-                              </div>
-                              {slide.reason && (
-                                <p className="text-sm text-slate-600 leading-relaxed">{slide.reason}</p>
-                              )}
-                              {slide.recencyNote && (
-                                <p className="text-[11px] font-medium text-sky-700">{slide.recencyNote}</p>
-                              )}
-                              {slide.excerpt && (
-                                <p className="text-xs leading-5 text-slate-400 line-clamp-2">{slide.excerpt}</p>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ));
-          })()}
+          {searchResults.length > 0 && (
+            <SlideSearchResults
+              groups={searchResults}
+              topicGroups={searchTopicGroups}
+              onPreviewSlide={(group, slide) =>
+                setPreview({ filePath: group.filePath, slideNumber: slide.slideNumber })
+              }
+              onToggleStaged={(group, slide) => {
+                if (isStaged(group.filePath, slide.slideNumber)) {
+                  const s = staged.find(
+                    (x) => x.filePath === group.filePath && x.slideNumber === slide.slideNumber
+                  );
+                  if (s) removeFromStaged(s.id);
+                } else {
+                  addToStaged(group, slide);
+                }
+              }}
+              isStagedFn={isStaged}
+            />
+          )}
         </div>
       </div>
 

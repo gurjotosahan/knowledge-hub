@@ -8,6 +8,9 @@ interface SlideSearchResultsProps {
   groups: SlideSearchGroup[];
   topicGroups?: SlideSearchTopicGroup[];
   onPreviewSlide: (group: SlideSearchGroup, slide: SlideSearchResult) => void;
+  // Staging mode — used by Slide Composer instead of checkbox+export
+  onToggleStaged?: (group: SlideSearchGroup, slide: SlideSearchResult) => void;
+  isStagedFn?: (filePath: string, slideNumber: number) => boolean;
 }
 
 function downloadBlob(blob: Blob, fallbackName: string, disposition: string | null) {
@@ -54,7 +57,8 @@ function SlidePreviewThumb({ slide }: { slide: SlideSearchResult }) {
   );
 }
 
-export default function SlideSearchResults({ groups, topicGroups = [], onPreviewSlide }: SlideSearchResultsProps) {
+export default function SlideSearchResults({ groups, topicGroups = [], onPreviewSlide, onToggleStaged, isStagedFn }: SlideSearchResultsProps) {
+  const stagingMode = !!onToggleStaged;
   const hasTopicGroups = topicGroups.length > 0;
   const renderGroups = useMemo(
     () => hasTopicGroups ? topicGroups.flatMap((topic) => topic.groups) : groups,
@@ -164,40 +168,71 @@ export default function SlideSearchResults({ groups, topicGroups = [], onPreview
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-semibold text-slate-800">{group.fileTitle}</h3>
                 <p className="text-xs text-slate-400">
-                  {group.slides.length} suggested slide{group.slides.length !== 1 ? "s" : ""} · selected {selectedSlides.join(", ") || "none"}
+                  {group.slides.length} suggested slide{group.slides.length !== 1 ? "s" : ""}
+                  {!stagingMode && ` · selected ${selectedSlides.join(", ") || "none"}`}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <button
-                  onClick={() =>
-                    setSelected((prev) => ({
-                      ...prev,
-                      [selectionKey]: allSelected ? [] : group.slides.map((slide) => slide.slideNumber),
-                    }))
-                  }
-                  className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-50"
-                >
-                  {allSelected ? "Clear" : "Select all"}
-                </button>
-                <button
-                  onClick={() => exportGroup(group, selectionKey)}
-                  disabled={selectedSlides.length === 0 || exportingPath === group.filePath}
-                  className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {exportingPath === group.filePath ? "Exporting..." : "Export"}
-                </button>
+                {stagingMode ? (
+                  <button
+                    onClick={() => group.slides.forEach((slide) => {
+                      if (!isStagedFn?.(group.filePath, slide.slideNumber))
+                        onToggleStaged!(group, slide);
+                    })}
+                    className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700"
+                  >
+                    Add all
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() =>
+                        setSelected((prev) => ({
+                          ...prev,
+                          [selectionKey]: allSelected ? [] : group.slides.map((slide) => slide.slideNumber),
+                        }))
+                      }
+                      className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                    >
+                      {allSelected ? "Clear" : "Select all"}
+                    </button>
+                    <button
+                      onClick={() => exportGroup(group, selectionKey)}
+                      disabled={selectedSlides.length === 0 || exportingPath === group.filePath}
+                      className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      {exportingPath === group.filePath ? "Exporting..." : "Export"}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
             <div className="divide-y divide-slate-100">
-              {group.slides.map((slide) => (
+              {group.slides.map((slide) => {
+                const staged = isStagedFn?.(group.filePath, slide.slideNumber) ?? false;
+                return (
                 <div key={slide.slideNumber} className="flex gap-3 px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={selectedSlides.includes(slide.slideNumber)}
-                    onChange={() => toggleSlide(selectionKey, slide.slideNumber)}
-                    className="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                  />
+                  {stagingMode ? (
+                    <button
+                      onClick={() => onToggleStaged!(group, slide)}
+                      className={`mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs font-bold transition-colors ${
+                        staged
+                          ? "bg-sky-600 text-white hover:bg-sky-700"
+                          : "bg-slate-100 text-slate-500 hover:bg-sky-50 hover:text-sky-600"
+                      }`}
+                      title={staged ? "Remove from deck" : "Add to deck"}
+                    >
+                      {staged ? "−" : "+"}
+                    </button>
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={selectedSlides.includes(slide.slideNumber)}
+                      onChange={() => toggleSlide(selectionKey, slide.slideNumber)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                    />
+                  )}
                   <button
                     onClick={() => onPreviewSlide(group, slide)}
                     className="shrink-0 text-left"
@@ -228,7 +263,8 @@ export default function SlideSearchResults({ groups, topicGroups = [], onPreview
                     )}
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
         );

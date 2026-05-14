@@ -575,7 +575,7 @@ export default function PptGeneratorPage() {
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Knowledge Hub
+            Apexon KM360
           </Link>
           <span className="text-slate-200">|</span>
           <h1 className="text-sm font-bold text-slate-800">PPT Generator</h1>
@@ -917,7 +917,7 @@ function Step2Content({
         <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
           {!isAiConfigured && (
             <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              No AI model configured. Open Settings on the Knowledge Hub home page first.
+              No AI model configured. Open Settings on the Apexon KM360 home page first.
             </div>
           )}
           <div>

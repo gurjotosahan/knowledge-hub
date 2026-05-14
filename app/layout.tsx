@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Apexon Knowledge Hub",
+  title: "Apexon KM360",
   description: "Search-first AI-assisted knowledge platform",
 };
 

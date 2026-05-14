@@ -644,7 +644,7 @@ JSON shape:
       Authorization: auth,
       ...(config.aiProvider === "openrouter" && {
         "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "Apexon Knowledge Hub",
+        "X-Title": "Apexon KM360",
       }),
     },
     body: JSON.stringify({
@@ -693,8 +693,9 @@ Choose the slides that best answer the user's request. Return only the JSON obje
 
   const response = await callReasoningJson(prompt, config, maxChoices).catch(() => null);
   const choices = response?.choices?.slice(0, maxChoices) ?? [];
-  if (choices.length === 0 && response) return [];
-  if (choices.length === 0) return candidates.slice(0, Math.min(3, maxChoices));
+  // Fall back to deterministic score ordering whenever the LLM returns nothing —
+  // never wipe results entirely just because the reranker had no opinion.
+  if (choices.length === 0) return candidates.slice(0, maxChoices);
 
   const byId = new Map(candidates.map((candidate) => [candidateId(candidate), candidate]));
   const selected: SlideCandidate[] = [];
@@ -740,7 +741,7 @@ async function searchSlidesForTopic(
     exactTopicChunks(sourceKey, profile),
   ]);
   const chunks = [...new Map([...exactChunks, ...retrievedChunks].map((chunk) => [chunk.id, chunk])).values()];
-  const candidates = (await toSlideCandidates(chunks, topic, sourceKey)).slice(0, 24);
+  const candidates = (await toSlideCandidates(chunks, topic, sourceKey)).slice(0, 40);
   return agenticRerankSlides(topic, candidates, agentConfig, maxResults);
 }
 
@@ -817,15 +818,15 @@ export async function POST(req: NextRequest) {
   }
 
   const multiTopic = topics.length > 1;
-  const perTopicLimit = multiTopic ? 3 : 10;
+  const perTopicLimit = multiTopic ? 10 : 20;
   const topicCandidates = await Promise.all(
     topics.map((topic) => searchSlidesForTopic(topic, sourceKey, agentConfig, perTopicLimit))
   );
   const topicGroups = topicCandidates
     .map((candidates, index) => makeTopicGroup(topics[index], index, candidates, perTopicLimit))
     .filter((group) => group.resultCount > 0);
-  const selectedCandidates = topicCandidates.flat().slice(0, 30);
-  const groups = groupCandidates(selectedCandidates, multiTopic ? 30 : 10);
+  const selectedCandidates = topicCandidates.flat().slice(0, 60);
+  const groups = groupCandidates(selectedCandidates, multiTopic ? 60 : 20);
   const slideCount = groups.reduce((sum, group) => sum + group.slides.length, 0);
   const harness = buildAgentHarnessReport({
     intent: "find_assets",

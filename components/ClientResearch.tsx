@@ -269,7 +269,7 @@ export default function ClientResearch({ config, sourceKey, onExitToHub }: Props
       doc.text(`Client Research: ${pdfSafeText(research.clientName)}`, 20, 16);
       doc.setFontSize(10);
       doc.setFont("helvetica", "normal");
-      doc.text(`Generated ${new Date(research.createdAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}  ·  Apexon Knowledge Hub`, 20, 26);
+      doc.text(`Generated ${new Date(research.createdAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}  ·  Apexon KM360`, 20, 26);
 
       doc.setTextColor(30, 41, 59); // slate-800
       y = 45;
@@ -411,7 +411,7 @@ export default function ClientResearch({ config, sourceKey, onExitToHub }: Props
       <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
       </svg>
-      Knowledge Hub
+      Apexon KM360
     </button>
   ) : null;
 

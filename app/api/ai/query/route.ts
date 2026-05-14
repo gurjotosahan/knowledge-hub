@@ -298,7 +298,7 @@ async function generateAlternativeQueries(
           Authorization: authHeader ?? "",
           ...(body.aiProvider === "openrouter" && {
             "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Apexon Knowledge Hub",
+            "X-Title": "Apexon KM360",
           }),
         },
         body: JSON.stringify({ model, messages: [{ role: "user", content: QUERY_REWRITE_PROMPT + query }], max_tokens: 80, temperature: 0.2 }),
@@ -346,7 +346,7 @@ async function generateHypotheticalPassage(
       Authorization: authHeader ?? "",
       ...(body.aiProvider === "openrouter" && {
         "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "Apexon Knowledge Hub",
+        "X-Title": "Apexon KM360",
       }),
     },
     body: JSON.stringify({ model, messages: [{ role: "user", content: HYDE_PROMPT + query }], max_tokens: 200, temperature: 0.3 }),
@@ -733,7 +733,7 @@ export async function POST(req: NextRequest) {
           Authorization: authHeader ?? "",
           ...(aiProvider === "openrouter" && {
             "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Apexon Knowledge Hub",
+            "X-Title": "Apexon KM360",
           }),
         },
         body: JSON.stringify({

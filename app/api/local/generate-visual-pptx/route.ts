@@ -33,7 +33,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const pptx = new PptxGenJS();
     pptx.defineLayout({ name: "WIDE", width: 13.333, height: 7.5 });
     pptx.layout = "WIDE";
-    pptx.author = "Apexon Knowledge Hub";
+    pptx.author = "Apexon KM360";
     pptx.company = "Apexon";
     pptx.subject = "Visual PPT Generator";
     pptx.title = body.title || body.slides[0]?.title || "Presentation";

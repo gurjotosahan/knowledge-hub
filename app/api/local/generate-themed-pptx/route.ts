@@ -167,7 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   pptx.layout = "KH_THEMED";
 
   pptx.title    = body.title || body.slides[0]?.title || "Presentation";
-  pptx.author   = "Apexon Knowledge Hub";
+  pptx.author   = "Apexon KM360";
   pptx.company  = "Apexon";
 
   const totalSlides = body.slides.length;

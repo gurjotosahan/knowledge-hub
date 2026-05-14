@@ -10,7 +10,7 @@ async function pickFolder() {
   if (process.platform === "darwin") {
     const { stdout } = await execFileAsync("osascript", [
       "-e",
-      'POSIX path of (choose folder with prompt "Choose your Knowledge Hub document source")',
+      'POSIX path of (choose folder with prompt "Choose your Apexon KM360 document source")',
     ]);
     return stdout.trim().replace(/\/$/, "");
   }
@@ -19,7 +19,7 @@ async function pickFolder() {
     const script = [
       "Add-Type -AssemblyName System.Windows.Forms",
       "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-      '$dialog.Description = "Choose your Knowledge Hub document source"',
+      '$dialog.Description = "Choose your Apexon KM360 document source"',
       "$dialog.ShowNewFolderButton = $false",
       "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath }",
     ].join("; ");
@@ -35,7 +35,7 @@ async function pickFolder() {
   const { stdout } = await execFileAsync("zenity", [
     "--file-selection",
     "--directory",
-    "--title=Choose your Knowledge Hub document source",
+    "--title=Choose your Apexon KM360 document source",
   ]);
   return stdout.trim().replace(/\/$/, "");
 }
