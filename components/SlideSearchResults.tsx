@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 import PdfPageCanvas from "@/components/PdfPageCanvas";
+import PptxPdfView from "@/components/PptxPdfView";
 
 interface SlideSearchResultsProps {
   groups: SlideSearchGroup[];
@@ -31,7 +32,7 @@ function confidenceClass(confidence?: SlideSearchResult["confidence"]): string {
   return "bg-slate-50 text-slate-500 border-slate-200";
 }
 
-function SlidePreviewThumb({ slide }: { slide: SlideSearchResult }) {
+function SlidePreviewThumb({ slide, filePath }: { slide: SlideSearchResult; filePath: string }) {
   if (slide.thumbnailUrl) {
     return (
       <img
@@ -50,9 +51,10 @@ function SlidePreviewThumb({ slide }: { slide: SlideSearchResult }) {
     );
   }
 
+  // On-demand fallback: convert via LibreOffice and render with PDF.js
   return (
-    <div className="flex h-20 w-32 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-sky-700">
-      Slide {slide.slideNumber}
+    <div className="h-20 w-32 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+      <PptxPdfView filePath={filePath} slideNumber={slide.slideNumber} displayWidth={128} />
     </div>
   );
 }
@@ -238,7 +240,7 @@ export default function SlideSearchResults({ groups, topicGroups = [], onPreview
                     className="shrink-0 text-left"
                     title={`Preview slide ${slide.slideNumber}`}
                   >
-                    <SlidePreviewThumb slide={slide} />
+                    <SlidePreviewThumb slide={slide} filePath={group.filePath} />
                     <span className="mt-1 block text-center text-[10px] font-semibold text-slate-500">
                       Slide {slide.slideNumber}
                     </span>
