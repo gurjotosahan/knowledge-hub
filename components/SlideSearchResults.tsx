@@ -33,28 +33,60 @@ function confidenceClass(confidence?: SlideSearchResult["confidence"]): string {
 }
 
 function SlidePreviewThumb({ slide, filePath }: { slide: SlideSearchResult; filePath: string }) {
-  if (slide.thumbnailUrl) {
-    return (
-      <img
-        src={slide.thumbnailUrl}
-        alt={`Slide ${slide.slideNumber} preview`}
-        className="h-20 w-32 rounded-lg border border-slate-200 bg-slate-100 object-cover"
-      />
-    );
-  }
+  const [preview, setPreview] = useState<{ x: number; y: number } | null>(null);
 
-  if (slide.previewPdfUrl) {
+  const handleMouseEnter = (e: React.MouseEvent<HTMLElement>) => {
+    if (!slide.thumbnailUrl) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const spaceRight = window.innerWidth - rect.right;
+    const x = spaceRight >= 540 ? rect.right + 10 : rect.left - 530;
+    const y = Math.min(rect.top, window.innerHeight - 300);
+    setPreview({ x, y });
+  };
+
+  const thumb = (() => {
+    if (slide.thumbnailUrl) {
+      return (
+        <img
+          src={slide.thumbnailUrl}
+          alt={`Slide ${slide.slideNumber} preview`}
+          className="h-20 w-32 rounded-lg border border-slate-200 bg-slate-100 object-cover"
+        />
+      );
+    }
+    if (slide.previewPdfUrl) {
+      return (
+        <div className="h-20 w-32 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+          <PdfPageCanvas fileUrl={slide.previewPdfUrl} pageNumber={slide.slideNumber} displayWidth={128} />
+        </div>
+      );
+    }
     return (
       <div className="h-20 w-32 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-        <PdfPageCanvas fileUrl={slide.previewPdfUrl} pageNumber={slide.slideNumber} displayWidth={128} />
+        <PptxPdfView filePath={filePath} slideNumber={slide.slideNumber} displayWidth={128} />
       </div>
     );
-  }
+  })();
 
-  // On-demand fallback: convert via LibreOffice and render with PDF.js
   return (
-    <div className="h-20 w-32 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-      <PptxPdfView filePath={filePath} slideNumber={slide.slideNumber} displayWidth={128} />
+    <div
+      className="relative shrink-0"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={() => setPreview(null)}
+    >
+      {thumb}
+      {preview && slide.thumbnailUrl && (
+        <div
+          className="pointer-events-none fixed z-[9999] rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl"
+          style={{ left: preview.x, top: preview.y }}
+        >
+          <img
+            src={slide.thumbnailUrl}
+            alt=""
+            className="w-[520px] rounded-lg object-contain"
+          />
+        </div>
+      )}
     </div>
   );
 }

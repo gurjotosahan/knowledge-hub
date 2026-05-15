@@ -2,8 +2,10 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 import type { ServiceLine, Source, AppConfig, Document, DocumentCategory, SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup, AgentHarnessReport } from "@/types";
 import { DEFAULT_CONFIG } from "@/types";
+import { canAccess, ADMIN_PERMISSIONS } from "@/lib/auth/permissions";
 import { aiAnswer } from "@/data/mockData";
 import Sidebar from "@/components/Sidebar";
 import DocumentBrowser from "@/components/DocumentBrowser";
@@ -56,6 +58,7 @@ interface Turn {
   docs?: Document[];
   slideGroups?: SlideSearchGroup[];
   slideTopicGroups?: SlideSearchTopicGroup[];
+  suggestions?: string[];
   harness?: AgentHarnessReport;
   isLoading: boolean;
   agentLog?: AgentLogEntry[];
@@ -166,7 +169,6 @@ export default function Page() {
     };
     setConfig(sanitized);
     localStorage.setItem(CONFIG_KEY, JSON.stringify(sanitized));
-    setShowSettings(false);
   };
 
   // ── Session persistence ───────────────────────────────────────────────────
@@ -206,6 +208,14 @@ export default function Page() {
   const newSessionId = () => `session-${Date.now()}`;
 
   // ── State ─────────────────────────────────────────────────────────────────
+  const { data: session } = useSession();
+  const permissions = session?.user?.permissions ?? ADMIN_PERMISSIONS;
+  const canAnswer   = canAccess(permissions, "answer");
+  const canSlides   = canAccess(permissions, "slides");
+  const canResearch = canAccess(permissions, "research");
+  const canRfp      = canAccess(permissions, "rfp");
+  const canWeb      = canAccess(permissions, "web");
+
   const [appMode,          setAppMode]          = useState<"knowledge" | "clientResearch" | "rfpAnalyzer">("knowledge");
   const [selectedLine,     setSelectedLine]     = useState<ServiceLine | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<DocumentCategory | null>(null);
@@ -455,6 +465,7 @@ export default function Page() {
                   docs:        [],
                   slideGroups,
                   slideTopicGroups,
+                  suggestions: (data.suggestions ?? []) as string[],
                   harness:     data.harness,
                 }
               : {
@@ -560,6 +571,7 @@ export default function Page() {
       filePath: group.filePath,
       fileType: "pptx",
       excerpt: slide.excerpt,
+      previewPdfUrl: slide.previewPdfUrl,
     });
   };
 
@@ -737,34 +749,38 @@ export default function Page() {
                         </svg>
                         Knowledge Search
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setAppMode("clientResearch")}
-                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
-                          appMode === "clientResearch" as typeof appMode
-                            ? "bg-white text-sky-700 shadow-sm"
-                            : "text-slate-500 hover:text-slate-700"
-                        }`}
-                      >
-                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M10 9h3m-3 3h5" />
-                        </svg>
-                        Client Research
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => router.push("/rfp-analyzer")}
-                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold text-slate-500 hover:text-sky-700 transition-all"
-                      >
-                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        RFP Analyzer
-                      </button>
+                      {canResearch && (
+                        <button
+                          type="button"
+                          onClick={() => setAppMode("clientResearch")}
+                          className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
+                            appMode === "clientResearch" as typeof appMode
+                              ? "bg-white text-sky-700 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700"
+                          }`}
+                        >
+                          <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M10 9h3m-3 3h5" />
+                          </svg>
+                          Client Research
+                        </button>
+                      )}
+                      {canRfp && (
+                        <button
+                          type="button"
+                          onClick={() => router.push("/rfp-analyzer")}
+                          className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold text-slate-500 hover:text-sky-700 transition-all"
+                        >
+                          <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          RFP Analyzer
+                        </button>
+                      )}
                     </div>
 
                     <p className="text-sm text-slate-500">
@@ -1014,6 +1030,25 @@ export default function Page() {
                                 </div>
                               )}
 
+                              {(turn.suggestions?.length ?? 0) > 0 && (
+                                <div className="rounded-xl border border-violet-100 bg-violet-50 px-4 py-3">
+                                  <p className="mb-2 text-xs font-semibold text-violet-600 uppercase tracking-wide">
+                                    {(turn.slideGroups?.length ?? 0) > 0 ? "Also try" : "Your query is broad — try one of these"}
+                                  </p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {turn.suggestions!.map((s) => (
+                                      <button
+                                        key={s}
+                                        onClick={() => handleSearch(s)}
+                                        className="rounded-full border border-violet-200 bg-white px-3 py-1 text-xs text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors"
+                                      >
+                                        {s}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
                               {(turn.slideGroups?.length ?? 0) > 0 && (
                                 <SlideSearchResults
                                   groups={turn.slideGroups!}
@@ -1132,74 +1167,82 @@ export default function Page() {
               <div className="max-w-3xl mx-auto flex flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2 md:gap-3">
                   <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
-                    <button
-                      onClick={() => setQueryMode("answer")}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                        queryMode === "answer"
-                          ? "bg-white text-slate-700 shadow-sm"
-                          : "text-slate-400 hover:text-slate-600"
-                      }`}
-                    >
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h8M8 14h5m-9 6l2.5-2.5H18a3 3 0 003-3V7a3 3 0 00-3-3H6a3 3 0 00-3 3v7.5a3 3 0 003 3H4z" />
-                      </svg>
-                      Answer
-                    </button>
-                    <button
-                      onClick={() => setQueryMode("slides")}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                        queryMode === "slides"
-                          ? "bg-white text-sky-700 shadow-sm"
-                          : "text-slate-400 hover:text-slate-600"
-                      }`}
-                    >
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm4 15h8m-4-4v4" />
-                      </svg>
-                      Find Slides
-                    </button>
-                    <button
-                      onClick={() => setAppMode("clientResearch")}
-                      className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-slate-400 hover:text-slate-600 transition-all"
-                    >
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M10 9h3m-3 3h5" />
-                      </svg>
-                      Client Research
-                    </button>
+                    {canAnswer && (
+                      <button
+                        onClick={() => setQueryMode("answer")}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                          queryMode === "answer"
+                            ? "bg-white text-slate-700 shadow-sm"
+                            : "text-slate-400 hover:text-slate-600"
+                        }`}
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h8M8 14h5m-9 6l2.5-2.5H18a3 3 0 003-3V7a3 3 0 00-3-3H6a3 3 0 00-3 3v7.5a3 3 0 003 3H4z" />
+                        </svg>
+                        Answer
+                      </button>
+                    )}
+                    {canSlides && (
+                      <button
+                        onClick={() => setQueryMode("slides")}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                          queryMode === "slides"
+                            ? "bg-white text-sky-700 shadow-sm"
+                            : "text-slate-400 hover:text-slate-600"
+                        }`}
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm4 15h8m-4-4v4" />
+                        </svg>
+                        Find Slides
+                      </button>
+                    )}
+                    {canResearch && (
+                      <button
+                        onClick={() => setAppMode("clientResearch")}
+                        className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-slate-400 hover:text-slate-600 transition-all"
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M10 9h3m-3 3h5" />
+                        </svg>
+                        Client Research
+                      </button>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
-                    <button
-                      onClick={() => setSearchMode("rag")}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                        searchMode === "rag"
-                          ? "bg-white text-slate-700 shadow-sm"
-                          : "text-slate-400 hover:text-slate-600"
-                      }`}
-                    >
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                      Documents
-                    </button>
-                    <button
-                      onClick={() => setSearchMode("mixed")}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                        searchMode === "mixed"
-                          ? "bg-white text-violet-700 shadow-sm"
-                          : "text-slate-400 hover:text-slate-600"
-                      }`}
-                    >
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                      </svg>
-                      + Web
-                    </button>
-                  </div>
+                  {canWeb && (
+                    <div className="flex items-center gap-0.5 p-1 rounded-full bg-slate-100 border border-slate-200">
+                      <button
+                        onClick={() => setSearchMode("rag")}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                          searchMode === "rag"
+                            ? "bg-white text-slate-700 shadow-sm"
+                            : "text-slate-400 hover:text-slate-600"
+                        }`}
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Documents
+                      </button>
+                      <button
+                        onClick={() => setSearchMode("mixed")}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                          searchMode === "mixed"
+                            ? "bg-white text-violet-700 shadow-sm"
+                            : "text-slate-400 hover:text-slate-600"
+                        }`}
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                        </svg>
+                        + Web
+                      </button>
+                    </div>
+                  )}
                   {searchMode === "mixed" && (
                     <button
                       onClick={() => setShowSettings(true)}

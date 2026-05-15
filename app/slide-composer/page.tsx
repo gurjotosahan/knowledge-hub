@@ -18,6 +18,7 @@ interface StagedSlide {
   fileTitle: string;
   slideNumber: number;
   isTemplate: boolean;
+  thumbnailUrl?: string;
 }
 
 interface TemplateInfo {
@@ -71,13 +72,34 @@ function SlideThumbnail({
   onPreview?: () => void;
   thumbnailUrl?: string;
 }) {
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+
+  const handleMouseEnter = (e: React.MouseEvent<HTMLElement>) => {
+    if (!thumbnailUrl) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const spaceRight = window.innerWidth - rect.right;
+    const x = spaceRight >= 540 ? rect.right + 10 : rect.left - 530;
+    const y = Math.min(rect.top, window.innerHeight - 300);
+    setHoverPos({ x, y });
+  };
+
   return (
     <div
       className={`rounded-xl border bg-white shadow-sm transition-all ${
         selected ? "border-sky-500 ring-2 ring-sky-300" : "border-slate-200 hover:border-slate-300"
       }`}
       style={{ width: displayWidth }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={() => setHoverPos(null)}
     >
+      {hoverPos && thumbnailUrl && (
+        <div
+          className="pointer-events-none fixed z-[9999] rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl"
+          style={{ left: hoverPos.x, top: hoverPos.y }}
+        >
+          <img src={thumbnailUrl} alt="" className="w-[520px] rounded-lg object-contain" />
+        </div>
+      )}
       {/* slide preview — clicking anywhere on the slide opens the zoom */}
       <div
         onClick={onPreview ?? onToggle}
@@ -114,6 +136,43 @@ function SlideThumbnail({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Staged slide mini thumb with hover preview ────────────────────────────────
+
+function StagedThumb({ slide }: { slide: StagedSlide }) {
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+
+  const handleMouseEnter = (e: React.MouseEvent<HTMLElement>) => {
+    if (!slide.thumbnailUrl) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const spaceRight = window.innerWidth - rect.right;
+    const x = spaceRight >= 540 ? rect.right + 10 : rect.left - 530;
+    const y = Math.min(rect.top, window.innerHeight - 300);
+    setHoverPos({ x, y });
+  };
+
+  return (
+    <div
+      className="w-14 h-9 shrink-0 overflow-hidden rounded border border-slate-100 bg-slate-50"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={() => setHoverPos(null)}
+    >
+      {slide.thumbnailUrl ? (
+        <img src={slide.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+      ) : (
+        <PptxSlideView filePath={slide.filePath} slideNumber={slide.slideNumber} displayWidth={56} />
+      )}
+      {hoverPos && slide.thumbnailUrl && (
+        <div
+          className="pointer-events-none fixed z-[9999] rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl"
+          style={{ left: hoverPos.x, top: hoverPos.y }}
+        >
+          <img src={slide.thumbnailUrl} alt="" className="w-[520px] rounded-lg object-contain" />
+        </div>
+      )}
     </div>
   );
 }
@@ -317,6 +376,7 @@ export default function SlideComposerPage() {
         fileTitle: group.fileTitle,
         slideNumber: slide.slideNumber,
         isTemplate: group.filePath === template?.path,
+        thumbnailUrl: slide.thumbnailUrl,
       },
     ]);
   };
@@ -570,9 +630,7 @@ export default function SlideComposerPage() {
                           </svg>
                           <span className="text-[10px] text-slate-400 w-5 text-right shrink-0">{idx + 1}.</span>
                           {/* mini thumb */}
-                          <div className="w-14 h-9 shrink-0 overflow-hidden rounded border border-slate-100 bg-slate-50">
-                            <PptxSlideView filePath={s.filePath} slideNumber={s.slideNumber} displayWidth={56} />
-                          </div>
+                          <StagedThumb slide={s} />
                           <div className="min-w-0 flex-1">
                             <p className="text-xs font-medium text-slate-700 truncate">
                               Slide {s.slideNumber}

@@ -19,6 +19,7 @@ export interface IndexMeta {
   parentChunks: number;
   files: number;
   indexedFiles: IndexedFile[];
+  visionIndexing?: boolean;
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
@@ -215,6 +216,31 @@ export async function appendIndex(
   await fs.writeFile(metaPath(sourceKey), JSON.stringify(nextMeta), "utf-8");
   clearRuntimeCaches(sourceKey);
   return nextMeta;
+}
+
+// ── Corpus summary ────────────────────────────────────────────────────────────
+
+export interface CorpusSummary {
+  generatedAt: string;
+  documentTitles: string[];
+  summary: string;
+}
+
+function corpusSummaryPath(sourceKey: string): string {
+  return dbDir(sourceKey) + ".corpus.json";
+}
+
+export async function readCorpusSummary(sourceKey: string): Promise<CorpusSummary | null> {
+  try {
+    const raw = await fs.readFile(corpusSummaryPath(sourceKey), "utf-8");
+    return JSON.parse(raw) as CorpusSummary;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeCorpusSummary(sourceKey: string, summary: CorpusSummary): Promise<void> {
+  await fs.writeFile(corpusSummaryPath(sourceKey), JSON.stringify(summary), "utf-8");
 }
 
 // ── Read meta ─────────────────────────────────────────────────────────────────

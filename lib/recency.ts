@@ -74,8 +74,8 @@ export function normalizeAssetYear(year?: number): number | undefined {
 }
 
 function extractExplicitYears(text: string): number[] {
-  return [...new Set(Array.from(text.matchAll(/\b(?:fy)?(20[1-3]\d|[2-3]\d)\b/gi))
-    .map((match) => normalizeYear(match[1]))
+  return [...new Set(Array.from(text.matchAll(/\bfy\s*(20[1-3]\d|[2-3]\d)\b|\b(20[1-3]\d)\b/gi))
+    .map((match) => normalizeYear(match[1] ?? match[2]))
     .filter((year): year is number => Boolean(year)))]
     .sort((a, b) => b - a);
 }
@@ -93,16 +93,19 @@ function extractYearCandidates(text: string): Array<{ year: number; confidence: 
   if (!cleaned) return [];
 
   const candidates: Array<{ year: number; confidence: YearConfidence; index: number }> = [];
-  const matches = cleaned.matchAll(/\b(?:fy\s*)?(20[1-3]\d|[2-3]\d)\b/gi);
+  // 2-digit FY shorthand (fy20, fy26) only when explicitly prefixed — bare "20" or "30" are not years
+  const matches = cleaned.matchAll(/\bfy\s*(20[1-3]\d|[2-3]\d)\b|\b(20[1-3]\d)\b/gi);
   for (const match of matches) {
-    const year = normalizeYear(match[1]);
+    const raw = match[1] ?? match[2];
+    const year = normalizeYear(raw);
     if (!year) continue;
     const index = match.index ?? 0;
     const context = cleaned.slice(Math.max(0, index - 60), Math.min(cleaned.length, index + 80));
     const early = index < 260;
     const copyrightFooter = COPYRIGHT_FOOTER_PATTERN.test(context);
     const strongContext = STRONG_YEAR_CONTEXT.test(context);
-    if (isProjectionYear(year, context)) continue;
+    // Copyright/footer years are never projections — only filter content years
+    if (!copyrightFooter && isProjectionYear(year, context)) continue;
     const confidence: YearConfidence = copyrightFooter || early || strongContext
         ? "high"
         : "medium";

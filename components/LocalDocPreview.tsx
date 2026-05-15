@@ -86,7 +86,7 @@ export default function LocalDocPreview({
   const [error,   setError]   = useState("");
 
   // PPTX → PDF conversion state
-  const [pptxStatus,   setPptxStatus]   = useState<PptxStatus>("idle");
+  const [pptxStatus,   setPptxStatus]   = useState<PptxStatus>(fileType === "pptx" ? "converting" : "idle");
   const [pptxPdfUrl,   setPptxPdfUrl]   = useState<string | null>(null);
   const [convProgress, setConvProgress] = useState(0);
 
@@ -111,6 +111,14 @@ export default function LocalDocPreview({
     if (blobUrlRef.current) { clearPdfCache(blobUrlRef.current); URL.revokeObjectURL(blobUrlRef.current); blobUrlRef.current = null; }
     setPptxPdfUrl(null);
     setPptxStatus("converting");
+
+    // If a pre-rendered PDF URL is already known (from index-time preview generation),
+    // use it directly — no LibreOffice conversion needed.
+    if (source.previewPdfUrl) {
+      setPptxPdfUrl(source.previewPdfUrl);
+      setPptxStatus("ready");
+      return;
+    }
 
     fetch(`/api/local/pptx-to-pdf?path=${encodeURIComponent(filePath)}`)
       .then(async r => {

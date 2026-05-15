@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { access, mkdir, rename, stat } from "fs/promises";
+import { access, mkdir, readdir, rename, stat } from "fs/promises";
 import { basename, join } from "path";
 import { homedir } from "os";
 
@@ -93,14 +93,11 @@ async function renderWithPdfToPpm(pdfPath: string, slideNumber: number, outDir: 
   if (!commandExists("pdftoppm")) return null;
   const prefix = join(outDir, `slide-${slideNumber}`);
   await execFileAsync("pdftoppm", ["-f", String(slideNumber), "-l", String(slideNumber), "-png", "-scale-to", "720", pdfPath, prefix], { timeout: 60_000 });
-  const candidates = [
-    `${prefix}-${slideNumber}.png`,
-    `${prefix}-1.png`,
-  ];
-  for (const candidate of candidates) {
-    if (await exists(candidate)) return candidate;
-  }
-  return null;
+  // pdftoppm zero-pads page numbers based on total page count (e.g. slide-5-05.png for a 39-page deck)
+  // so scan the directory for any file matching the prefix rather than guessing the padding
+  const files = await readdir(outDir);
+  const match = files.find((f) => f.startsWith(`slide-${slideNumber}-`) && f.endsWith(".png"));
+  return match ? join(outDir, match) : null;
 }
 
 async function renderWithMagick(pdfPath: string, slideNumber: number, outDir: string): Promise<string | null> {

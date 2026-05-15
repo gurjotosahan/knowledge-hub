@@ -21,6 +21,10 @@ export async function POST(req: NextRequest) {
     embeddingProvider?: "ollama" | "google";
     generateSlidePreviews?: boolean;
     enableAssetLlmEnrichment?: boolean;
+    enableVisionIndexing?: boolean;
+    visionModel?: string;
+    visionWordThreshold?: number;
+    forceRebuild?: boolean;
     aiProvider?: "ollama" | "openrouter" | "gemini";
     ollamaModel?: string;
     openrouterApiKey?: string;
@@ -68,6 +72,10 @@ export async function POST(req: NextRequest) {
           {
             generateSlidePreviews: Boolean(body.generateSlidePreviews),
             enableAssetLlmEnrichment: Boolean(body.enableAssetLlmEnrichment),
+            enableVisionIndexing: Boolean(body.enableVisionIndexing),
+            visionModel: body.visionModel,
+            visionWordThreshold: body.visionWordThreshold,
+            forceRebuild: Boolean(body.forceRebuild),
             assetLlmConfig: aiConfig,
           }
         );

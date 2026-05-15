@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { extractDoc, type ExtractedDoc } from "@/lib/extractors";
-import { appendIndex, writeIndex, readMeta, type IndexMeta, type IndexedFile } from "./store";
+import { appendIndex, writeIndex, readMeta, writeCorpusSummary, type IndexMeta, type IndexedFile } from "./store";
 import { preRenderPptxDeck, type SlidePreviewInfo } from "@/lib/localSlidePreviews";
 import {
   classifyDocumentAsset,
@@ -46,6 +46,59 @@ interface IndexExtractOptions {
   generateSlidePreviews?: boolean;
   enableAssetLlmEnrichment?: boolean;
   assetLlmConfig?: AssetLlmConfig;
+  enableVisionIndexing?: boolean;
+  visionModel?: string;
+  visionWordThreshold?: number;
+  ollamaBaseUrl?: string;
+  forceRebuild?: boolean;
+}
+
+const VISION_PROMPT =
+  "Describe this presentation slide concisely. List the key facts, metrics, headings, and main ideas visible. Be specific and factual.";
+
+async function describeSlideWithVision(
+  thumbnailPath: string,
+  config: AssetLlmConfig,
+): Promise<string> {
+  const imageBytes = await fs.readFile(thumbnailPath);
+  const b64 = imageBytes.toString("base64");
+
+  if (config.aiProvider === "ollama") {
+    const res = await fetch(`${config.ollamaBaseUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: config.ollamaModel, prompt: VISION_PROMPT, images: [b64], stream: false }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`Ollama vision error: ${res.status}`);
+    const data = await res.json() as { response?: string };
+    return data.response?.trim() ?? "";
+  }
+
+  // OpenRouter and Gemini both use the OpenAI-compatible chat completions format
+  const [url, auth, model] = config.aiProvider === "gemini"
+    ? ["https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", `Bearer ${config.geminiApiKey}`, config.geminiModel]
+    : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${config.openrouterApiKey}`, config.openrouterModel];
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify({
+      model,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
+          { type: "text", text: VISION_PROMPT },
+        ],
+      }],
+      max_tokens: 500,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+  const data = await res.json() as { choices?: { message?: { content?: string } }[] };
+  return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
 // Lightweight metadata returned by loadIndex — no chunks array (data lives in LanceDB)
@@ -233,11 +286,12 @@ export async function indexExtractedDocs(
   googleApiKey = "",
   options: IndexExtractOptions = {}
 ): Promise<{ chunks: number; files: number }> {
+  options = { ...options, ollamaBaseUrl: options.ollamaBaseUrl ?? ollamaBaseUrl };
   const chunks: RagChunk[] = [];
   const childrenToEmbed: RagChunk[] = [];
   const previewByDoc = new Map<string, Map<number, SlidePreviewInfo>>();
 
-  if (options.generateSlidePreviews) {
+  if (options.generateSlidePreviews || options.enableVisionIndexing) {
     const pptxDocs = docs.filter((doc) => doc.fileType === "pptx");
     onProgress(`Preparing cached slide previews for ${pptxDocs.length} PPTX deck(s)...`);
     for (const doc of pptxDocs) {
@@ -265,6 +319,24 @@ export async function indexExtractedDocs(
 
     for (const slide of doc.slides) {
       if (!slide.text?.trim()) continue;
+      if (options.enableVisionIndexing) {
+        const wordCount = slide.text.trim().split(/\s+/).length;
+        const threshold = options.visionWordThreshold ?? 200;
+        const thumbPath = docPreviews?.get(slide.number)?.thumbnailPath;
+        if (wordCount <= threshold && thumbPath) {
+          try {
+            const visionCfg: AssetLlmConfig = options.assetLlmConfig ?? {
+              aiProvider: "ollama",
+              ollamaBaseUrl: options.ollamaBaseUrl ?? "http://localhost:11434",
+              ollamaModel: "qwen2.5vl:7b",
+            };
+            const visionDesc = await describeSlideWithVision(thumbPath, visionCfg);
+            if (visionDesc) slide.text = `${slide.text}\n\n[Visual content: ${visionDesc}]`;
+          } catch {
+            // vision failure is non-fatal; text-only indexing proceeds
+          }
+        }
+      }
       const ruleSectionIntel = classifySectionAsset(docIntel, slide.text, slide.number);
       const sectionIntel = options.enableAssetLlmEnrichment
         ? await enrichSectionAssetWithLlm(ruleSectionIntel, slide.number, slide.text, options.assetLlmConfig)
@@ -321,12 +393,67 @@ export async function indexExtractedDocs(
     parentChunks: parentCount,
     files: fileNames.size,
     indexedFiles,
+    visionIndexing: Boolean(options.enableVisionIndexing),
   };
 
   await writeIndex(sourceKey, chunks, meta);
 
+  const documentTitles = docs.map((doc) => doc.fileName.replace(/\.(pptx|pdf|docx)$/i, ""));
+  await generateAndStoreCorpusSummary(sourceKey, documentTitles, options.assetLlmConfig).catch(() => {});
+
   onProgress(`Done — ${parentCount} parent chunks (${chunks.length} total) from ${docs.length} files.`);
   return { chunks: parentCount, files: docs.length };
+}
+
+async function generateAndStoreCorpusSummary(
+  sourceKey: string,
+  documentTitles: string[],
+  config?: AssetLlmConfig
+): Promise<void> {
+  let summary = "";
+  if (config && documentTitles.length > 0) {
+    const prompt = `You are cataloging a corporate sales knowledge hub. Here are the document titles:\n\n${documentTitles.join("\n")}\n\nIn 2-3 sentences, describe what topics, industries, service lines, and types of documents are covered in this collection. Be specific.`;
+    try {
+      if (config.aiProvider === "ollama") {
+        const res = await fetch(`${config.ollamaBaseUrl ?? "http://localhost:11434"}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: config.ollamaModel, prompt, stream: false }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (res.ok) {
+          const data = await res.json() as { response?: string };
+          summary = data.response?.trim() ?? "";
+        }
+      } else {
+        const [url, auth, model] = config.aiProvider === "gemini"
+          ? ["https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", `Bearer ${config.geminiApiKey}`, config.geminiModel]
+          : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${config.openrouterApiKey}`, config.openrouterModel];
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 200,
+            temperature: 0,
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (res.ok) {
+          const data = await res.json() as { choices?: { message?: { content?: string } }[] };
+          summary = data.choices?.[0]?.message?.content?.trim() ?? "";
+        }
+      }
+    } catch {
+      // non-fatal — title list is stored regardless
+    }
+  }
+  await writeCorpusSummary(sourceKey, {
+    generatedAt: new Date().toISOString(),
+    documentTitles,
+    summary,
+  });
 }
 
 export async function appendExtractedDocs(
@@ -339,11 +466,12 @@ export async function appendExtractedDocs(
   googleApiKey = "",
   options: IndexExtractOptions = {}
 ): Promise<{ chunks: number; files: number; totalChunks: number; totalFiles: number }> {
+  options = { ...options, ollamaBaseUrl: options.ollamaBaseUrl ?? ollamaBaseUrl };
   const chunks: RagChunk[] = [];
   const childrenToEmbed: RagChunk[] = [];
   const previewByDoc = new Map<string, Map<number, SlidePreviewInfo>>();
 
-  if (options.generateSlidePreviews) {
+  if (options.generateSlidePreviews || options.enableVisionIndexing) {
     const pptxDocs = docs.filter((doc) => doc.fileType === "pptx");
     onProgress(`Preparing cached slide previews for ${pptxDocs.length} new PPTX deck(s)...`);
     for (const doc of pptxDocs) {
@@ -371,6 +499,24 @@ export async function appendExtractedDocs(
 
     for (const slide of doc.slides) {
       if (!slide.text?.trim()) continue;
+      if (options.enableVisionIndexing) {
+        const wordCount = slide.text.trim().split(/\s+/).length;
+        const threshold = options.visionWordThreshold ?? 200;
+        const thumbPath = docPreviews?.get(slide.number)?.thumbnailPath;
+        if (wordCount <= threshold && thumbPath) {
+          try {
+            const visionCfg: AssetLlmConfig = options.assetLlmConfig ?? {
+              aiProvider: "ollama",
+              ollamaBaseUrl: options.ollamaBaseUrl ?? "http://localhost:11434",
+              ollamaModel: "qwen2.5vl:7b",
+            };
+            const visionDesc = await describeSlideWithVision(thumbPath, visionCfg);
+            if (visionDesc) slide.text = `${slide.text}\n\n[Visual content: ${visionDesc}]`;
+          } catch {
+            // vision failure is non-fatal; text-only indexing proceeds
+          }
+        }
+      }
       const ruleSectionIntel = classifySectionAsset(docIntel, slide.text, slide.number);
       const sectionIntel = options.enableAssetLlmEnrichment
         ? await enrichSectionAssetWithLlm(ruleSectionIntel, slide.number, slide.text, options.assetLlmConfig)
@@ -437,6 +583,7 @@ export async function appendExtractedDocs(
     parentChunks: parentCount,
     files: fileNames.size,
     indexedFiles,
+    visionIndexing: Boolean(options.enableVisionIndexing),
   };
 
   const nextMeta = await appendIndex(sourceKey, chunks, meta);
@@ -497,14 +644,20 @@ export async function buildIndex(
   const filePaths = await walkFolder(folderPath);
   onProgress(`Found ${filePaths.length} file(s). Checking for new/modified files…`);
 
+  if (options.forceRebuild) {
+    onProgress("Force rebuild requested. Rebuilding the full index from scratch…");
+    return buildFullIndex(filePaths, folderPath, ollamaBaseUrl, embedModel, onProgress, embeddingProvider, googleApiKey, options);
+  }
+
   const existingMeta = await readMeta(folderPath);
   const canAppend =
     existingMeta &&
     existingMeta.version === INDEX_VERSION &&
-    existingMeta.embedModel === embedModel;
+    existingMeta.embedModel === embedModel &&
+    Boolean(existingMeta.visionIndexing) === Boolean(options.enableVisionIndexing);
 
   if (existingMeta && !canAppend) {
-    onProgress("Index schema or embedding model changed. Rebuilding the full index...");
+    onProgress("Index settings changed (schema, embedding model, or vision). Rebuilding the full index...");
     return buildFullIndex(filePaths, folderPath, ollamaBaseUrl, embedModel, onProgress, embeddingProvider, googleApiKey, options);
   }
 

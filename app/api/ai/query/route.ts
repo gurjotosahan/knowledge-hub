@@ -13,6 +13,7 @@ import {
   type WebResult,
 } from "@/lib/rag/agent";
 import { resolveAiConfig } from "@/lib/serverConfig";
+import { appendSearchLog, makeSearchLogEntry } from "@/lib/searchLog";
 import { isParallelMcpEnabled } from "@/lib/parallelMcp";
 import {
   buildAgentHarnessReport,
@@ -446,6 +447,12 @@ export async function POST(req: NextRequest) {
   if (!query || !sourceKey) {
     return NextResponse.json({ error: "Missing query or sourceKey" }, { status: 400 });
   }
+
+  const searchStart = Date.now();
+  let logResultCount = 0;
+  let logError: string | null = null;
+
+  try {
 
   // ── 1. Verify index ─────────────────────────────────────────────────────────
   const indexMeta = await loadIndex(sourceKey);
@@ -945,6 +952,7 @@ export async function POST(req: NextRequest) {
     ],
   });
 
+  logResultCount = sources.length + slideGroupsFromAnswer.reduce((s, g) => s + g.slides.length, 0);
   return NextResponse.json({
     answer: parsed.answer,
     keyPoints: parsed.keyPoints,
@@ -960,4 +968,24 @@ export async function POST(req: NextRequest) {
       totalTokens,
     },
   });
+
+  } catch (err) {
+    logError = String(err).replace(/^Error:\s*/, "");
+    return NextResponse.json({ error: logError }, { status: 500 });
+  } finally {
+    void appendSearchLog(makeSearchLogEntry({
+      query,
+      mode: "answer",
+      sourceKey,
+      intent,
+      topicCount: 1,
+      resultCount: logResultCount,
+      noResult: logResultCount === 0 && !logError,
+      weakResult: logResultCount > 0 && logResultCount < 2,
+      latencyMs: Date.now() - searchStart,
+      usedAgenticRag: false,
+      suggestions: [],
+      error: logError,
+    }));
+  }
 }

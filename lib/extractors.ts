@@ -82,14 +82,37 @@ async function extractPptxSlides(filePath: string): Promise<ExtractedSlide[]> {
   const slideKeys = await getOrderedPptxSlidePaths(zip);
 
   const slides: ExtractedSlide[] = [];
+  let slideNum = 0;
   for (let i = 0; i < slideKeys.length; i++) {
     const xml = await zip.files[slideKeys[i]].async("text");
-    const parts: string[] = [];
+
+    // LibreOffice skips hidden slides when converting to PDF, so we must too —
+    // otherwise every slide after a hidden one gets the wrong PDF page number.
+    if (/<p:sld\b[^>]*\bshow="(?:0|false)"/.test(xml)) continue;
+    slideNum++;
+
+    // Extract title placeholder text so it can be weighted more heavily
+    const titleParts: string[] = [];
+    for (const spMatch of xml.matchAll(/<p:sp\b[\s\S]*?<\/p:sp>/g)) {
+      const sp = spMatch[0];
+      if (!/<p:ph[^>]*\btype="(?:title|ctrTitle)"/.test(sp)) continue;
+      Array.from(sp.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)).forEach((m) => {
+        const t = cleanExtractedXmlText(m[1]);
+        if (t) titleParts.push(t);
+      });
+    }
+
+    // All text runs (includes tables, SmartArt, and other non-sp shapes)
+    const allParts: string[] = [];
     Array.from(xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)).forEach((m) => {
       const t = cleanExtractedXmlText(m[1]);
-      if (t) parts.push(t);
+      if (t) allParts.push(t);
     });
-    slides.push({ number: i + 1, text: parts.join(" ") });
+
+    // Title appears 3× total (2 extra prepends + 1× inside allParts) to anchor
+    // the embedding to the slide's main topic without losing body text context.
+    const text = [...titleParts, ...titleParts, ...allParts].join(" ");
+    slides.push({ number: slideNum, text });
   }
 
   return slides;

@@ -185,12 +185,22 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const slideH  = sldSzM ? +sldSzM[2] : 5143500;
     const totalSlides = (presXml.match(/<p:sldId\b/g) ?? []).length;
 
+    // ── Resolve the correct slide path using presentation order ──
+    // ppt/slides/slideN.xml file numbers do NOT match presentation order;
+    // presentation.xml defines the real sequence via <p:sldId r:id="..."> elements.
+    const { getOrderedPptxSlidePaths } = await import("@/lib/pptxOrder");
+    const orderedPaths = await getOrderedPptxSlidePaths(zip);
+    const slidePath = orderedPaths[slideNum - 1]; // slideNum is 1-indexed
+    const slideFileName = slidePath?.split("/").pop() ?? `slide${slideNum}.xml`;
+
     // ── Slide XML & its rel map ──
-    const slideXml = await zip.files[`ppt/slides/slide${slideNum}.xml`]?.async("text");
+    const slideXml = slidePath
+      ? await zip.files[slidePath]?.async("text")
+      : await zip.files[`ppt/slides/slide${slideNum}.xml`]?.async("text");
     if (!slideXml) return NextResponse.json({ error: "Slide not found" }, { status: 404 });
 
     const slideRelsXml =
-      (await zip.files[`ppt/slides/_rels/slide${slideNum}.xml.rels`]?.async("text")) ?? "";
+      (await zip.files[`ppt/slides/_rels/${slideFileName}.rels`]?.async("text")) ?? "";
     const slideRelMap = buildRelMap(slideRelsXml, "ppt/slides");
 
     // ── Resolve slide layout ──

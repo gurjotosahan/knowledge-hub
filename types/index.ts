@@ -32,6 +32,9 @@ export interface AppConfig {
   embeddingProvider: "ollama" | "google";
   generateSlidePreviews: boolean;
   enableAssetLlmEnrichment: boolean;
+  enableVisionIndexing: boolean;
+  visionModel: string;
+  visionWordThreshold: number;
   // Web search
   tavilyApiKey: string;
 }
@@ -56,6 +59,9 @@ export const DEFAULT_CONFIG: AppConfig = {
   embeddingProvider: "ollama",
   generateSlidePreviews: false,
   enableAssetLlmEnrichment: false,
+  enableVisionIndexing: false,
+  visionModel: "qwen2.5vl:7b",
+  visionWordThreshold: 200,
   tavilyApiKey: "",
 };
 
@@ -145,6 +151,7 @@ export interface Source {
   filePath?: string;
   fileType?: SearchableFileType;
   excerpt?: string;
+  previewPdfUrl?: string;
   // Web search fields
   sourceType?: "rag" | "web";
   url?: string;

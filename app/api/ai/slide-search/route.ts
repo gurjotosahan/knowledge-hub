@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadIndex } from "@/lib/rag/indexer";
 import { getEmbedding, agenticRAG, type AgentConfig } from "@/lib/rag/agent";
 import { retrieve, type RetrievedChunk } from "@/lib/rag/retriever";
-import { ftsSearch, fetchFileParents } from "@/lib/rag/store";
+import { ftsSearch, fetchFileParents, readCorpusSummary } from "@/lib/rag/store";
 import { resolveAiConfig } from "@/lib/serverConfig";
 import { buildAgentHarnessReport, classifyAgentIntent, type AgentHarnessTraceEntry } from "@/lib/agentHarness";
 import { describeYear, extractYearMetadata, isRecencySensitiveQuery, normalizeAssetYear, recencyScore } from "@/lib/recency";
+import { appendSearchLog, makeSearchLogEntry } from "@/lib/searchLog";
 import type { SlideSearchGroup, SlideSearchResult, SlideSearchTopicGroup } from "@/types";
 
 export const maxDuration = 300;
@@ -129,6 +130,21 @@ const QUERY_TERM_EXPANSIONS: Record<string, string[]> = {
   practice: ["capability", "capabilities", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
   practices: ["capability", "capabilities", "credentials", "offering", "offerings", "footprint", "domain", "domains"],
   methodology: ["approach", "framework", "process", "steps", "phases", "activities"],
+  // Follow-the-Sun / delivery model synonyms
+  follow: ["follow-the-sun", "rightshore", "right-shore", "offshore", "nearshore"],
+  sun: ["follow-the-sun", "rightshore", "right-shore", "24x7", "global delivery"],
+  offshore: ["follow-the-sun", "rightshore", "right-shore", "nearshore", "onshore"],
+  nearshore: ["offshore", "rightshore", "right-shore", "follow-the-sun", "onshore"],
+  rightshore: ["right-shore", "offshore", "nearshore", "follow-the-sun", "global delivery"],
+  // Talent / workforce synonyms
+  talent: ["hiring", "recruitment", "staffing", "workforce", "headcount", "attrition", "retention"],
+  acquisition: ["hiring", "recruitment", "staffing", "sourcing", "talent"],
+  hiring: ["talent", "acquisition", "recruitment", "staffing", "sourcing"],
+  recruitment: ["talent", "acquisition", "hiring", "staffing", "sourcing"],
+  // Agile synonyms
+  agile: ["scrum", "kanban", "sprint", "iteration", "lean", "devops", "safe"],
+  scrum: ["agile", "sprint", "kanban", "iteration"],
+  sprint: ["agile", "scrum", "iteration", "release"],
 };
 
 function queryTerms(query: string): string[] {
@@ -486,8 +502,8 @@ function rescoreCandidate(candidate: SlideCandidate, profile: SearchProfile): Sl
   };
 }
 
-async function toSlideCandidates(chunks: RetrievedChunk[], query: string, sourceKey: string): Promise<SlideCandidate[]> {
-  const profile = makeSearchProfile(query);
+async function toSlideCandidates(chunks: RetrievedChunk[], query: string, sourceKey: string, profile?: SearchProfile): Promise<SlideCandidate[]> {
+  profile ??= makeSearchProfile(query);
   const bySlide = new Map<string, SlideCandidate>();
 
   for (const chunk of chunks) {
@@ -728,20 +744,177 @@ async function exactTopicChunks(sourceKey: string, profile: SearchProfile): Prom
     .map((chunk) => ({ ...chunk, score: (chunk as RetrievedChunk).score ?? 0.8 }));
 }
 
+// ── Vague-query detection & suggestions ───────────────────────────────────────
+
+const VAGUE_ONLY_TERMS = new Set([
+  "capabilities", "capability", "approach", "methodology", "framework", "overview",
+  "strategy", "solution", "solutions", "service", "services", "offering", "offerings",
+  "presentation", "proposal", "update", "latest", "recent", "trend", "trends",
+  "report", "document", "information", "details", "summary", "intro", "introduction",
+]);
+
+function isVagueQuery(profile: SearchProfile): boolean {
+  const meaningful = profile.canonicalFocusTerms.filter((t) => !GENERIC_QUERY_TERMS.has(t));
+  if (meaningful.length === 0) return true;
+  if (meaningful.length === 1) return true;
+  if (meaningful.length <= 2 && meaningful.every((t) => VAGUE_ONLY_TERMS.has(t))) return true;
+  return false;
+}
+
+async function generateQuerySuggestions(
+  query: string,
+  config: AgentConfig,
+  documentTitles: string[],
+  corpusSummary: string,
+): Promise<string[]> {
+  const titlesBlock = documentTitles.slice(0, 40).join("\n");
+  const system = "You generate specific search query suggestions for a corporate sales knowledge hub. Return ONLY a valid JSON array of 4 search phrases (4-8 words each) that refine the vague query into targeted searches likely to find relevant slides. No explanation, no wrapper object.";
+  const user = [
+    corpusSummary ? `Corpus overview: ${corpusSummary}` : "",
+    `Available documents:\n${titlesBlock}`,
+    `Vague query: "${query}"`,
+    "Return 4 specific refinements as a JSON array.",
+  ].filter(Boolean).join("\n\n");
+
+  try {
+    let raw: string;
+    if (config.aiProvider === "ollama") {
+      const res = await fetch(`${config.ollamaBaseUrl ?? "http://localhost:11434"}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: config.ollamaModel,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          stream: false,
+          format: "json",
+          options: { temperature: 0, num_predict: 300 },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return [];
+      raw = (await res.json()).message?.content ?? "[]";
+    } else {
+      const [url, auth, model] = config.aiProvider === "gemini"
+        ? ["https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", `Bearer ${config.geminiApiKey}`, config.geminiModel]
+        : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${config.openrouterApiKey}`, config.openrouterModel];
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: auth,
+          ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon KM360" }),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          temperature: 0,
+          max_tokens: 300,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return [];
+      raw = (await res.json()).choices?.[0]?.message?.content ?? "[]";
+    }
+    const parsed: unknown = JSON.parse(raw.trim());
+    const arr = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as Record<string, unknown>).suggestions)
+        ? (parsed as Record<string, unknown>).suggestions as unknown[]
+        : Object.values(parsed as Record<string, unknown>).find(Array.isArray) as unknown[] ?? [];
+    return arr
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 3)
+      .map((s) => s.trim())
+      .slice(0, 4);
+  } catch {
+    return [];
+  }
+}
+
+async function llmExpandQuery(query: string, config: AgentConfig): Promise<string[]> {
+  const system = "You expand search queries for a business document search engine. Return ONLY a valid JSON array of strings — synonyms, acronyms, and related business terms likely to appear in presentation slides about this topic. No explanation, no wrapper object.";
+  const user = `Query: "${query}"\n\nReturn 6-10 synonyms and related terms as a JSON array.`;
+
+  try {
+    let raw: string;
+    if (config.aiProvider === "ollama") {
+      const res = await fetch(`${config.ollamaBaseUrl ?? "http://localhost:11434"}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: config.ollamaModel,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          stream: false,
+          format: "json",
+          options: { temperature: 0, num_predict: 300 },
+        }),
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) return [];
+      raw = (await res.json()).message?.content ?? "[]";
+    } else {
+      const [url, auth, model] = config.aiProvider === "gemini"
+        ? ["https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", `Bearer ${config.geminiApiKey}`, config.geminiModel]
+        : ["https://openrouter.ai/api/v1/chat/completions", `Bearer ${config.openrouterApiKey}`, config.openrouterModel];
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: auth,
+          ...(config.aiProvider === "openrouter" && { "HTTP-Referer": "http://localhost:3000", "X-Title": "Apexon KM360" }),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          temperature: 0,
+          max_tokens: 300,
+        }),
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) return [];
+      raw = (await res.json()).choices?.[0]?.message?.content ?? "[]";
+    }
+
+    // Handle bare array or {"terms": [...]} wrapper
+    const parsed: unknown = JSON.parse(raw.trim());
+    const arr = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as Record<string, unknown>).terms)
+        ? (parsed as Record<string, unknown>).terms as unknown[]
+        : Object.values(parsed as Record<string, unknown>).find(Array.isArray) as unknown[] ?? [];
+    return arr.filter((t): t is string => typeof t === "string" && t.trim().length > 1).map((t) => t.toLowerCase().trim());
+  } catch {
+    return [];
+  }
+}
+
+function augmentProfile(profile: SearchProfile, expandedTerms: string[]): SearchProfile {
+  if (expandedTerms.length === 0) return profile;
+  const newFocusTerms = expandedTerms.flatMap((t) => t.split(/\s+/)).filter((t) => t.length > 2 && !GENERIC_QUERY_TERMS.has(t));
+  const newPhrases = expandedTerms.filter((t) => t.includes(" "));
+  return {
+    ...profile,
+    focusTerms: [...new Set([...profile.focusTerms, ...newFocusTerms, ...expandedTerms])],
+    topicPhrases: [...new Set([...profile.topicPhrases, ...newPhrases])],
+  };
+}
+
 async function searchSlidesForTopic(
   topic: string,
   sourceKey: string,
   agentConfig: AgentConfig,
   maxResults: number
 ): Promise<SlideCandidate[]> {
-  const queryEmbedding = await getEmbedding(topic, agentConfig).catch(() => null);
-  const profile = makeSearchProfile(topic);
+  const [queryEmbedding, expandedTerms] = await Promise.all([
+    getEmbedding(topic, agentConfig).catch(() => null),
+    llmExpandQuery(topic, agentConfig).catch(() => [] as string[]),
+  ]);
+  const profile = augmentProfile(makeSearchProfile(topic), expandedTerms);
   const [retrievedChunks, exactChunks] = await Promise.all([
     retrieve(topic, queryEmbedding, sourceKey, 80).catch(() => [] as RetrievedChunk[]),
     exactTopicChunks(sourceKey, profile),
   ]);
   const chunks = [...new Map([...exactChunks, ...retrievedChunks].map((chunk) => [chunk.id, chunk])).values()];
-  const candidates = (await toSlideCandidates(chunks, topic, sourceKey)).slice(0, 40);
+  const candidates = (await toSlideCandidates(chunks, topic, sourceKey, profile)).slice(0, 40);
   return agenticRerankSlides(topic, candidates, agentConfig, maxResults);
 }
 
@@ -782,11 +955,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const searchStart = Date.now();
+  let logResultCount = 0;
+  let logError: string | null = null;
+  let logSuggestions: string[] = [];
+  let logIntent = "";
+  let logTopicCount = 1;
+
+  try {
+
   const agentConfig: AgentConfig = resolveAiConfig({
     ...body,
     ollamaEmbedModel: body.ollamaEmbedModel ?? indexMeta.embedModel,
   });
   const intent = classifyAgentIntent(query);
+  logIntent = intent;
   const harnessTrace: AgentHarnessTraceEntry[] = [
     { step: "intent", tool: "intent_classifier", query, found: 1, status: "ok", note: intent },
   ];
@@ -816,18 +999,34 @@ export async function POST(req: NextRequest) {
     topics = decomposeSearchIntents(query);
     harnessTrace.push({ step: "plan", tool: "slide_intent_decomposer", query, found: topics.length, status: "ok" });
   }
+  logTopicCount = topics.length;
 
   const multiTopic = topics.length > 1;
   const perTopicLimit = multiTopic ? 10 : 20;
-  const topicCandidates = await Promise.all(
-    topics.map((topic) => searchSlidesForTopic(topic, sourceKey, agentConfig, perTopicLimit))
-  );
+
+  const profile = makeSearchProfile(query);
+  const vagueQuery = isVagueQuery(profile);
+  const [topicCandidates, suggestions] = await Promise.all([
+    Promise.all(topics.map((topic) => searchSlidesForTopic(topic, sourceKey, agentConfig, perTopicLimit))),
+    vagueQuery
+      ? readCorpusSummary(sourceKey).then((corpus) =>
+          generateQuerySuggestions(
+            query,
+            agentConfig,
+            corpus?.documentTitles ?? [],
+            corpus?.summary ?? "",
+          )
+        ).catch(() => [] as string[])
+      : Promise.resolve([] as string[]),
+  ]);
   const topicGroups = topicCandidates
     .map((candidates, index) => makeTopicGroup(topics[index], index, candidates, perTopicLimit))
     .filter((group) => group.resultCount > 0);
   const selectedCandidates = topicCandidates.flat().slice(0, 60);
   const groups = groupCandidates(selectedCandidates, multiTopic ? 60 : 20);
   const slideCount = groups.reduce((sum, group) => sum + group.slides.length, 0);
+  logResultCount = slideCount;
+  logSuggestions = suggestions;
   const harness = buildAgentHarnessReport({
     intent: "find_assets",
     toolsUsed: ["slide_search", ...(agenticInfo ? ["agentic_rag"] : [])],
@@ -855,6 +1054,27 @@ export async function POST(req: NextRequest) {
     topicGroups,
     groups,
     harness,
+    ...(suggestions.length > 0 && { suggestions }),
     ...(agenticInfo && { agenticInfo }),
   });
+
+  } catch (err) {
+    logError = String(err).replace(/^Error:\s*/, "");
+    return NextResponse.json({ error: logError }, { status: 500 });
+  } finally {
+    void appendSearchLog(makeSearchLogEntry({
+      query,
+      mode: "slides",
+      sourceKey,
+      intent: logIntent,
+      topicCount: logTopicCount,
+      resultCount: logResultCount,
+      noResult: logResultCount === 0 && !logError,
+      weakResult: logResultCount > 0 && logResultCount < 3,
+      latencyMs: Date.now() - searchStart,
+      usedAgenticRag: Boolean(body.useAgenticRag),
+      suggestions: logSuggestions,
+      error: logError,
+    }));
+  }
 }
